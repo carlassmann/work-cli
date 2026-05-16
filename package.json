@@ -1,0 +1,57 @@
+{
+  "name": "@ccssmnn/work-cli",
+  "version": "0.1.0",
+  "description": "Worktree-aware local dev command runner. Treats git worktrees as named workspaces, supervises commands, captures logs, and gives routed commands stable *.localhost URLs via portless.",
+  "keywords": [
+    "cli",
+    "dev",
+    "developer-experience",
+    "git-worktree",
+    "monorepo",
+    "tmux",
+    "portless",
+    "workspaces",
+    "process-supervisor"
+  ],
+  "author": "Carl Assmann <assmann@hey.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/ccssmnn/work-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ccssmnn/work-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ccssmnn/work-cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "work": "./dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "bun src/main.ts",
+    "check": "bun run typecheck && bun run lint && bun run knip",
+    "knip": "knip",
+    "lint": "oxlint",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run check && bun test && bun run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "knip": "^6.12.2",
+    "oxlint": "^1.63.0",
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

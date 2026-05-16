@@ -1,0 +1,15 @@
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+
+# project-local config (each consumer creates their own)
+work.config.js
+work.config.mjs
+work.config.cjs
+
+# editor cruft
+.idea
+*.swp
+
+
