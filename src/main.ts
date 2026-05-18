@@ -84,6 +84,7 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
 async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Result<void>> {
   switch (name) {
     case "init":         return runInit(args)
+    case "create":       return runCreate(args)
     case "up":           return runUp(args)
     case "setup":        return runSetup(args)
     case "down":         return runDown(args)
@@ -127,6 +128,29 @@ async function runInit(args: ReadonlyArray<string>): Promise<Result<void>> {
     console.error("warning: not in a git repository. work commands beyond `init` require git.")
   }
 
+  return ok(undefined)
+}
+
+async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args)
+  if (!parsed.ok) return parsed
+
+  const workspaceName = parsed.value.positional[0]
+  if (!workspaceName) {
+    return errResult("CLIError", "missing workspace. Usage: work create <workspace>")
+  }
+
+  const ctx = await loadProjectContext()
+  if (!ctx.ok) return ctx
+
+  const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: true, noCreate: false })
+  if (!workspace.ok) return workspace
+
+  if (workspace.value.root === ctx.value.cwdRoot) {
+    return errResult("WorkspaceError", `workspace ${workspace.value.workspace} is the current worktree`)
+  }
+
+  console.log(`${workspace.value.created ? "created" : "exists"} ${workspace.value.workspace}\t${workspace.value.root}`)
   return ok(undefined)
 }
 

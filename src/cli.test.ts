@@ -53,6 +53,37 @@ describe("cli", () => {
     assert.ok(result.stderr.includes("workspace feature-x does not exist"))
   })
 
+  test("create creates a worktree without setup or commands", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const setupFile = path.join(root, "setup-env.json")
+    const setupCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, "ran")'`
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      worktrees: {
+        dir: "worktrees",
+        setup: ${JSON.stringify(setupCommand)},
+      },
+      commands: {
+        web: {
+          run: "node -e 'setTimeout(() => {}, 10_000)'",
+          autoStart: true,
+        },
+      },
+    }`)
+
+    const result = await runCli(["create", "feature-x"], { cwd: root, stateRoot })
+
+    assert.equal(result.stderr, "")
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("created feature-x"))
+    assert.ok(await fs.stat(path.join(root, "worktrees", "feature-x")))
+    await assert.rejects(fs.stat(setupFile))
+    await assert.rejects(fs.stat(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json")))
+  })
+
   test("ps aligns columns for long workspace names", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")

@@ -36,6 +36,7 @@ Zero runtime dependencies — just Node ≥ 20 stdlib. The full CLI ships as one
 ## What you get
 
 ```sh
+work create feature-x       # create a worktree without setup or processes
 work up feature-x --create   # create worktree, run setup, start configured servers
 work urls feature-x          # see where everything is reachable
 work logs -f web             # tail one service
@@ -129,6 +130,9 @@ work start claude -- claude --dangerously-skip-permissions
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
 work up image-uploads --create
 work start -w image-uploads claude -- claude
+
+# Or just create a clean worktree without setup or servers.
+work create refactor-sidebar
 
 # Need to debug? Tail the sync server logs.
 work logs -f -w chat-streaming sync

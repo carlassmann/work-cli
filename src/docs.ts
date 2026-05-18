@@ -284,6 +284,9 @@ Config:
   work init [project]
     create work.config.js
 
+  work create <workspace>
+    create a git worktree without setup or commands
+
   work up [workspace] [--create|--no-create]
     start autoStart commands for a workspace
 

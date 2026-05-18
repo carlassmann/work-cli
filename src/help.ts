@@ -8,6 +8,7 @@ Usage:
 
 Commands:
   init       Create work.config.js.
+  create     Create a git worktree.
   up         Start workspace commands.
   setup      Run the workspace setup hook.
   down       Stop workspace commands.
@@ -34,6 +35,7 @@ State-only commands also work outside a project; use -p/-w if ambiguous.
 
 Examples:
   work init tilly
+  work create feature-x
   work up feature-x
   work up feature-x --create
   work setup feature-x
@@ -68,6 +70,23 @@ Arguments:
 Examples:
   work init
   work init tilly`,
+
+  create: `work create
+
+Create a git worktree without running setup or starting commands.
+
+Usage:
+  work create <workspace>
+
+Arguments:
+  workspace    Workspace slug.
+
+Behavior:
+  work create feature-x   Create ../<project>.worktrees/feature-x from HEAD.
+  work create feature-x   Print existing path when already created.
+
+Examples:
+  work create feature-x`,
 
   up: `work up
 

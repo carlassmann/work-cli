@@ -167,6 +167,7 @@ _work() {
   local -a subcommands
   subcommands=(
     'init:Create work.config.js'
+    'create:Create git worktree'
     'up:Start workspace commands'
     'setup:Run workspace setup hook'
     'down:Stop workspace commands'
@@ -197,7 +198,7 @@ _work() {
   local pos=$(( CURRENT - 2 ))
 
   case $cmd in
-    up|setup|down|urls|cd)
+    create|up|setup|down|urls|cd)
       (( pos == 1 )) && _work_emit workspaces
       ;;
     run|logs|stop|attach|restart)
@@ -239,14 +240,14 @@ const bashScript = `_work() {
   cmd="\${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "init up setup down run restart ps status logs urls start attach stop doctor prune daemon docs completions shell-init cd" -- "$cur") )
+    COMPREPLY=( $(compgen -W "init create up setup down run restart ps status logs urls start attach stop doctor prune daemon docs completions shell-init cd" -- "$cur") )
     return
   fi
 
   local values=""
 
   case "$cmd" in
-    up|setup|down|urls|cd)
+    create|up|setup|down|urls|cd)
       values=$(work _complete workspaces 2>/dev/null)
       ;;
     run|logs|stop|attach|restart)
