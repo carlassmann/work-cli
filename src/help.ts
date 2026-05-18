@@ -30,6 +30,7 @@ Commands:
 
 The workspace is implied from the current git branch. Pass it explicitly
 as a positional to up/setup/down/urls/cd, or via -w to run/restart/logs/stop/attach/start.
+State-only commands also work outside a project; use -p/-w if ambiguous.
 
 Examples:
   work init tilly
@@ -124,13 +125,19 @@ Stop all tracked commands for a workspace.
 
 Usage:
   work down [workspace]
+  work down --all
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
+Options:
+  -a, --all                 Stop all tracked commands outside a project.
+  -p, --project <name>      Filter tracked state by project.
+
 Examples:
   work down
-  work down feature-x`,
+  work down feature-x
+  work down --all`,
 
   start: `work start
 
@@ -157,9 +164,10 @@ Examples:
 Attach to an ad-hoc tmux command.
 
 Usage:
-  work attach [-w workspace] <id>
+  work attach [-p project] [-w workspace] <id>
 
 Options:
+  -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
@@ -171,9 +179,10 @@ Examples:
 Stop one tracked command.
 
 Usage:
-  work stop [-w workspace] <id>
+  work stop [-p project] [-w workspace] <id>
 
 Options:
+  -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
@@ -185,15 +194,16 @@ Examples:
 Stop and start one configured or ad-hoc command, or all configured commands.
 
 Usage:
-  work restart [-w workspace] <command>
-  work restart [-w workspace] --all
+  work restart [-p project] [-w workspace] <command>
+  work restart [-p project] [-w workspace] --all
 
 Arguments:
   command      Configured or ad-hoc command id.
 
 Options:
+  -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
-  -a, --all                 Restart every autoStart command in the workspace.
+  -a, --all                 Restart every autoStart command, or tracked commands outside a project.
 
 Examples:
   work restart web
@@ -254,13 +264,14 @@ Empty state:
 Print or follow captured stdout/stderr for one command.
 
 Usage:
-  work logs [-f] [-w workspace] <command>
+  work logs [-f] [-p project] [-w workspace] <command>
 
 Arguments:
   command      Configured or ad-hoc command id.
 
 Options:
   -f, --follow              Stream logs until interrupted.
+  -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
@@ -274,10 +285,13 @@ Examples:
 List known URLs for routed commands in a workspace.
 
 Usage:
-  work urls [workspace]
+  work urls [-p project] [workspace]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
+
+Options:
+  -p, --project <name>      Filter tracked state by project.
 
 URL shape:
   {command}-{workspace}-{project}.localhost

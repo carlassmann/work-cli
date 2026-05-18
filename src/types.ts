@@ -57,7 +57,7 @@ export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 1
+export const DAEMON_PROTOCOL_VERSION = 2
 
 export type DaemonCommand =
   | {
@@ -91,6 +91,12 @@ export type DaemonCommand =
       command: string
     }
   | {
+      type: "restartTracked"
+      project: string
+      workspace: string
+      command: string
+    }
+  | {
       type: "prune"
     }
   | {
@@ -110,6 +116,7 @@ type DaemonResults = {
   run: StartResult
   adhoc: StartResult
   restart: StartResult
+  restartTracked: StartResult
   down: Array<string>
   stop: boolean
   prune: number

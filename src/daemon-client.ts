@@ -42,6 +42,8 @@ export async function ensureDaemon(): Promise<Result<number>> {
     return ok(status.pid)
   }
 
+  await killStaleDaemon(status.pid)
+
   const ensureDir = await safeMkdir(stateRoot())
   if (!ensureDir.ok) return ensureDir
 
@@ -98,6 +100,7 @@ export async function stopDaemon(): Promise<Result<void>> {
   const status = await daemonStatus()
 
   if (!status.running) {
+    await killStaleDaemon(status.pid)
     await cleanupDaemonFiles()
     return ok(undefined)
   }
@@ -152,6 +155,16 @@ export async function sendDaemon<T extends DaemonCommand>(
 async function cleanupDaemonFiles() {
   await fs.rm(daemonSocketFile(), { force: true }).catch((cause) => debugLog("daemon", `rm socket: ${describe(cause)}`))
   await fs.rm(daemonPidFile(), { force: true }).catch((cause) => debugLog("daemon", `rm pid: ${describe(cause)}`))
+}
+
+async function killStaleDaemon(pid: number | null) {
+  if (pid === null || !isPidRunning(pid)) return
+
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch (cause) {
+    debugLog("daemon", `kill stale pid=${pid}: ${describe(cause)}`)
+  }
 }
 
 async function waitForDaemon(exited: () => { code: number | null; signal: NodeJS.Signals | null } | null): Promise<Result<void>> {
@@ -264,4 +277,3 @@ async function daemonEntrypoint() {
     }
   }
 }
-

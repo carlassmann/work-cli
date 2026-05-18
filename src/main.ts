@@ -18,7 +18,7 @@ import { commandExists, existsAt } from "./shell.js"
 import { daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, ok, tryAsync } from "./result.js"
 import type { Result } from "./result.js"
-import type { DevConfig, StartResult, WorkspaceRecord } from "./types.js"
+import type { DevConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const VERSION = "0.1.0"
 
@@ -30,6 +30,11 @@ type ProjectContext = {
   root: string
   cwdRoot: string
   config: DevConfig
+}
+
+type StateFilters = {
+  project?: string | undefined
+  workspace?: string | undefined
 }
 
 const result = await main(process.argv.slice(2))
@@ -192,28 +197,54 @@ async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runDown(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, {
+    flags: { all: booleanFlag("a"), project: valueFlag("p") },
+  })
   if (!parsed.ok) return parsed
 
   const workspaceArg = parsed.value.positional[0]
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
+  if (!ctx.ok || parsed.value.flags.all || parsed.value.flags.project) {
+    if (!workspaceArg && !parsed.value.flags.all) {
+      return errResult("CLIError", "missing workspace outside a work project. Usage: work down [workspace] | work down --all")
+    }
+
+    const states = await findWorkspaceStates({
+      project: parsed.value.flags.project,
+      workspace: workspaceArg,
+    })
+    if (!states.ok) return states
+
+    return downStates(states.value)
+  }
 
   const workspace = workspaceArg ?? await defaultWorkspace(ctx.value.cwdRoot)
+  return downStates([{ project: ctx.value.config.project, workspace }])
+}
+
+async function downStates(states: Array<Pick<WorkspaceState, "project" | "workspace">>): Promise<Result<void>> {
+  if (states.length === 0) {
+    console.log("no tracked commands")
+    return ok(undefined)
+  }
 
   const daemon = await ensureDaemon()
   if (!daemon.ok) return daemon
 
-  const response = await sendDaemon({ type: "down", project: ctx.value.config.project, workspace })
-  if (!response.ok) return response
+  let count = 0
 
-  if (response.value.data.length === 0) {
-    console.log(`no tracked commands for ${workspace}`)
-    return ok(undefined)
+  for (const state of states) {
+    const response = await sendDaemon({ type: "down", project: state.project, workspace: state.workspace })
+    if (!response.ok) return response
+
+    for (const id of response.value.data) {
+      count++
+      console.log(`stopped ${state.project}/${state.workspace}/${id}`)
+    }
   }
 
-  for (const id of response.value.data) {
-    console.log(`stopped ${id}`)
+  if (count === 0) {
+    console.log("no tracked commands")
   }
 
   return ok(undefined)
@@ -254,11 +285,12 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { all: booleanFlag("a"), workspace: valueFlag("w") },
+    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w") },
   })
   if (!parsed.ok) return parsed
 
   const all = parsed.value.flags.all
+  const projectArg = parsed.value.flags.project
   const workspaceArg = parsed.value.flags.workspace
   const target = parsed.value.positional[0]
 
@@ -267,7 +299,21 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
+  if (!ctx.ok || projectArg) {
+    if (all) {
+      const states = await findWorkspaceStates({ project: projectArg, workspace: workspaceArg })
+      if (!states.ok) return states
+      return restartTrackedStates(states.value)
+    }
+
+    if (!target) {
+      return errResult("CLIError", "missing command. Usage: work restart [-w workspace] <command> | work restart --all")
+    }
+
+    const resolved = await resolveTrackedCommand(target, { project: projectArg, workspace: workspaceArg })
+    if (!resolved.ok) return resolved
+    return restartTracked(resolved.value)
+  }
 
   const workspace = await resolveWorkspace(ctx.value, workspaceArg, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
@@ -352,6 +398,35 @@ async function restartAdhoc(ctx: ProjectContext, workspace: WorkspaceResolution,
   return ok(undefined)
 }
 
+async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Result<void>> {
+  const targets = states.flatMap((state) =>
+    Object.keys(state.commands).map((command) => ({ project: state.project, workspace: state.workspace, command })),
+  )
+
+  if (targets.length === 0) {
+    console.log("no tracked commands")
+    return ok(undefined)
+  }
+
+  for (const target of targets) {
+    const result = await restartTracked(target)
+    if (!result.ok) return result
+  }
+
+  return ok(undefined)
+}
+
+async function restartTracked(target: { project: string; workspace: string; command: string }): Promise<Result<void>> {
+  const daemon = await ensureDaemon()
+  if (!daemon.ok) return daemon
+
+  const response = await sendDaemon({ type: "restartTracked", ...target })
+  if (!response.ok) return response
+
+  printProcessStart(`${target.project}/${target.workspace}/${target.command}`, response.value.data, "restarted")
+  return ok(undefined)
+}
+
 async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args)
   if (!parsed.ok) return parsed
@@ -389,7 +464,7 @@ function formatTable(rows: Array<Array<string>>): string {
 
 async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { follow: booleanFlag("f"), workspace: valueFlag("w") },
+    flags: { follow: booleanFlag("f"), project: valueFlag("p"), workspace: valueFlag("w") },
   })
   if (!parsed.ok) return parsed
 
@@ -399,17 +474,31 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
+  let resolved: { project: string; workspace: string; command: string }
 
-  const workspace = parsed.value.flags.workspace ?? await defaultWorkspace(ctx.value.cwdRoot)
-  const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
+  if (ctx.ok && !parsed.value.flags.project) {
+    resolved = {
+      project: ctx.value.config.project,
+      workspace: parsed.value.flags.workspace ?? await defaultWorkspace(ctx.value.cwdRoot),
+      command,
+    }
+  } else {
+    const target = await resolveTrackedCommand(command, {
+      project: parsed.value.flags.project,
+      workspace: parsed.value.flags.workspace,
+    })
+    if (!target.ok) return target
+    resolved = target.value
+  }
+
+  const stateResult = await readWorkspaceState(resolved.project, resolved.workspace)
   if (!stateResult.ok) return stateResult
 
-  const record = stateResult.value?.commands[command]
-  const logFile = record?.log ?? commandLogFile(ctx.value.config.project, workspace, command)
+  const record = stateResult.value?.commands[resolved.command]
+  const logFile = record?.log ?? commandLogFile(resolved.project, resolved.workspace, resolved.command)
 
   if (!await existsAt(logFile)) {
-    return errResult("CLIError", `no log for ${workspace}/${command}`)
+    return errResult("CLIError", `no log for ${resolved.workspace}/${resolved.command}`)
   }
 
   if (!parsed.value.flags.follow) {
@@ -425,12 +514,29 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, { flags: { project: valueFlag("p") } })
   if (!parsed.ok) return parsed
 
   const workspaceArg = parsed.value.positional[0]
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
+  if (!ctx.ok || parsed.value.flags.project) {
+    const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
+    if (!states.ok) return states
+
+    const rows = states.value.flatMap((state) =>
+      Object.values(state.commands)
+        .filter((command) => command.url)
+        .map((command) => [`${state.project}/${state.workspace}`, command.id, command.url ?? ""]),
+    )
+
+    if (rows.length === 0) {
+      console.log(workspaceArg ? `no routed commands for ${workspaceArg}` : "no routed commands")
+    } else {
+      console.log(formatTable(rows))
+    }
+
+    return ok(undefined)
+  }
 
   const workspace = workspaceArg ?? await defaultWorkspace(ctx.value.cwdRoot)
   const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
@@ -681,7 +787,7 @@ async function runComplete(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function parseWorkspaceAndCommand(args: ReadonlyArray<string>): Promise<Result<{ project: string; workspace: string; command: string }>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w") } })
+  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
 
   const command = parsed.value.positional[0]
@@ -690,13 +796,49 @@ async function parseWorkspaceAndCommand(args: ReadonlyArray<string>): Promise<Re
   }
 
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
+  if (!ctx.ok || parsed.value.flags.project) {
+    return resolveTrackedCommand(command, {
+      project: parsed.value.flags.project,
+      workspace: parsed.value.flags.workspace,
+    })
+  }
 
   const workspace = parsed.value.flags.workspace
     ? slugify(parsed.value.flags.workspace)
     : await defaultWorkspace(ctx.value.cwdRoot)
 
   return ok({ project: ctx.value.config.project, workspace, command })
+}
+
+async function resolveTrackedCommand(
+  command: string,
+  filters: StateFilters,
+): Promise<Result<{ project: string; workspace: string; command: string }>> {
+  const states = await findWorkspaceStates(filters)
+  if (!states.ok) return states
+
+  const matches = states.value.filter((state) => state.commands[command])
+
+  if (matches.length === 0) {
+    return errResult("CLIError", `no tracked command: ${command}`)
+  }
+
+  if (matches.length > 1) {
+    return errResult("CLIError", `ambiguous command: ${command}. Use -p project and/or -w workspace.`)
+  }
+
+  const [state] = matches
+  return ok({ project: state.project, workspace: state.workspace, command })
+}
+
+async function findWorkspaceStates(filters: StateFilters): Promise<Result<Array<WorkspaceState>>> {
+  const project = filters.project ? slugify(filters.project) : undefined
+  const workspace = filters.workspace ? slugify(filters.workspace) : undefined
+  const states = (await listWorkspaceStates())
+    .filter((state) => !project || state.project === project)
+    .filter((state) => !workspace || state.workspace === workspace)
+
+  return ok(states)
 }
 
 async function loadProjectContext(): Promise<Result<ProjectContext>> {

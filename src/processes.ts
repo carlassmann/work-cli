@@ -5,6 +5,7 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { routeName, routeUrl } from "./names.js"
 import { portlessUrl, spawnCommand } from "./portless.js"
 import { commandExists, isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
@@ -118,6 +119,116 @@ export async function stopCommand(project: string, workspace: string, id: string
   if (!write.ok) return write
 
   return ok(true)
+}
+
+export async function restartTrackedCommand(project: string, workspace: string, id: string): Promise<Result<{ record: CommandRecord; started: boolean }>> {
+  const stateResult = await readWorkspaceState(project, workspace)
+  if (!stateResult.ok) return stateResult
+
+  const state = stateResult.value
+  const command = state?.commands[id]
+
+  if (!state || !command) {
+    return errResult("ProcessError", `no tracked command: ${workspace}/${id}`)
+  }
+
+  if (command.runner === "tmux") {
+    await killTmuxWindow(command.tmuxSession, command.tmuxWindow)
+    return startAdhocCommand({ project, commands: {} }, state, id, command.argv)
+  }
+
+  if (isPidRunning(command.pid)) {
+    await stopProcessTree(command.pid)
+  }
+
+  const mkdir = await tryAsync("IOError", "failed to create log directory", async () =>
+    await fsp.mkdir(path.dirname(command.log), { recursive: true }),
+  )
+  if (!mkdir.ok) return mkdir
+
+  const openLog = trySync("IOError", `failed to open log file ${command.log}`, () => fs.openSync(command.log, "a"))
+  if (!openLog.ok) return openLog
+
+  const commandProcess = trackedProcessCommand(state, command)
+  const spawned = await spawnWithLog(commandProcess.executable, commandProcess.args, {
+    cwd: command.cwd,
+    shell: commandProcess.shell,
+    output: openLog.value,
+    env: {
+      ...process.env,
+      WORK_PROJECT: project,
+      WORK_WORKSPACE: workspace,
+      WORK_COMMAND: id,
+    },
+  })
+  if (!spawned.ok) return spawned
+  spawned.value.unref()
+
+  if (!spawned.value.pid) {
+    return errResult("ProcessError", `spawn produced no pid for ${id}`)
+  }
+
+  const record: ProcessCommandRecord = {
+    ...command,
+    pid: spawned.value.pid,
+    command: commandProcess.display,
+    url: commandProcess.url,
+    startedAt: new Date().toISOString(),
+  }
+
+  state.commands[id] = record
+  const write = await writeWorkspaceState(state)
+  if (!write.ok) {
+    await stopProcessTree(spawned.value.pid)
+    return write
+  }
+
+  return ok({ record, started: true })
+}
+
+function trackedProcessCommand(state: WorkspaceState, command: ProcessCommandRecord) {
+  const routed = parsePortlessCommand(command.command)
+
+  if (!routed) {
+    return {
+      executable: command.command,
+      args: [],
+      shell: true,
+      display: command.command,
+      url: command.url,
+    }
+  }
+
+  const route = routeName(state.project, state.workspace, command.id, routePrefix(state, command, routed.route))
+  const run = routed.run
+
+  return {
+    executable: "portless",
+    args: [route, "sh", "-lc", run],
+    shell: false,
+    display: `portless ${route} sh -lc ${JSON.stringify(run)}`,
+    url: routeUrl(state.project, state.workspace, command.id, routePrefix(state, command, routed.route)),
+  }
+}
+
+function parsePortlessCommand(command: string): { route: string; run: string } | null {
+  const match = command.match(/^portless\s+(\S+)\s+sh\s+-lc\s+(.+)$/)
+  if (!match) return null
+
+  try {
+    return { route: match[1], run: JSON.parse(match[2]) as string }
+  } catch {
+    return null
+  }
+}
+
+function routePrefix(state: WorkspaceState, command: ProcessCommandRecord, route: string) {
+  if (route.includes(".")) return route.split(".")[0]
+
+  const suffix = `-${state.workspace}-${state.project}`
+  if (route.endsWith(suffix)) return route.slice(0, -suffix.length)
+
+  return command.id
 }
 
 export async function pruneDeadCommands(): Promise<Result<number>> {
@@ -408,4 +519,3 @@ function tmuxSessionName(project: string, workspace: string) {
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
-

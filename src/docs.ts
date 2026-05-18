@@ -129,6 +129,11 @@ Commands using git:
   work setup feature-x      resolves an existing worktree
   work run/restart/logs     use current branch when workspace is omitted
 
+State-only commands:
+  ps/status/prune/daemon/docs/completions/shell-init/doctor do not need config
+  logs/urls/attach/stop/down/restart can use tracked state outside a project
+  up/setup/run/start/cd need work.config.js
+
 Why:
   git already knows branches and worktrees
   existing git tools keep working
@@ -286,22 +291,23 @@ Config:
     run worktrees.setup for a workspace
 
   work down [workspace]
+  work down --all
     stop all tracked commands for a workspace
 
   work start [-w workspace] <id> -- <command>
     start an ad-hoc command in tmux
 
-  work attach [-w workspace] <id>
+  work attach [-p project] [-w workspace] <id>
     attach to an ad-hoc tmux command
 
-  work stop [-w workspace] <id>
+  work stop [-p project] [-w workspace] <id>
     stop one tracked command
 
-  work restart [-w workspace] <command>
+  work restart [-p project] [-w workspace] <command>
     stop and start one configured or ad-hoc command
 
-  work restart [-w workspace] --all
-    stop and start all configured commands
+  work restart [-p project] [-w workspace] --all
+    stop and start all configured commands, or tracked commands outside a project
 
   work run [-w workspace] <command>
     start one configured command, idempotently
@@ -312,10 +318,10 @@ Config:
   work status
     alias for work ps
 
-  work logs [-f|--follow] [-w workspace] <command>
+  work logs [-f|--follow] [-p project] [-w workspace] <command>
     print or stream captured stdout/stderr for one command
 
-  work urls [workspace]
+  work urls [-p project] [workspace]
     print known URLs for routed commands
 
   work doctor

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises"
 import net from "node:net"
-import { debugLog, describe } from "./result.js"
-import { pruneDeadCommands, startAdhocCommand, startCommand, stopCommand } from "./processes.js"
+import { debugLog, describe, formatError } from "./result.js"
+import { pruneDeadCommands, restartTrackedCommand, startAdhocCommand, startCommand, stopCommand } from "./processes.js"
 import { daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
 
 const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
-  ["run", "adhoc", "down", "stop", "restart", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
+  ["run", "adhoc", "down", "stop", "restart", "restartTracked", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
 )
 
 type DesiredCommand = {
@@ -104,7 +104,7 @@ async function handlePayload(payload: string): Promise<DaemonResponse> {
   const result = await handleCommand(command)
 
   if (!result.ok) {
-    return { ok: false, error: result.error.message, tag: result.error.tag }
+    return { ok: false, error: formatError(result.error), tag: result.error.tag }
   }
 
   return { ok: true, data: result.value as DaemonResultType<typeof command.type> }
@@ -168,6 +168,12 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
         const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command)
         if (!stop.ok) return stop
         return startDesired(command.config, command.workspace, command.command)
+      })
+
+    case "restartTracked":
+      return serialize(workspaceLock(command.project, command.workspace), async () => {
+        desired.delete(key(command.project, command.workspace, command.command))
+        return restartTrackedCommand(command.project, command.workspace, command.command)
       })
 
     case "prune":

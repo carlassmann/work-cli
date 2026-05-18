@@ -110,6 +110,114 @@ describe("cli", () => {
     assert.equal(lines[0].indexOf(String(pid)), lines[1].indexOf(String(pid)))
   })
 
+  test("state commands work outside a configured project", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const log = path.join(root, "web.log")
+
+    await writeFile(log, "hello from state\n")
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "feature-x",
+      branch: null,
+      root,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command: "bun run dev",
+          cwd: root,
+          log,
+          url: "https://web-feature-x-tilly.localhost",
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: 99999999,
+        },
+      },
+    }))
+
+    const urls = await runCli(["urls"], { cwd: root, stateRoot })
+    assert.equal(urls.exitCode, 0)
+    assert.ok(urls.stdout.includes("tilly/feature-x"))
+    assert.ok(urls.stdout.includes("https://web-feature-x-tilly.localhost"))
+
+    const logs = await runCli(["logs", "web"], { cwd: root, stateRoot })
+    assert.equal(logs.exitCode, 0)
+    assert.equal(logs.stdout, "hello from state\n\n")
+
+    const stop = await runCli(["stop", "-p", "tilly", "-w", "feature-x", "web"], { cwd: root, stateRoot })
+    assert.equal(stop.exitCode, 0)
+    assert.ok(stop.stdout.includes("stopped feature-x/web"))
+  })
+
+  test("restart --all works outside a configured project", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const log = path.join(root, "web.log")
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`
+
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "feature-x",
+      branch: null,
+      root,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command,
+          cwd: root,
+          log,
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: 99999999,
+        },
+      },
+    }))
+
+    const restart = await runCli(["restart", "--all"], { cwd: root, stateRoot })
+    assert.equal(restart.exitCode, 0)
+    assert.ok(restart.stdout.includes("restarted tilly/feature-x/web pid="))
+
+    const state = JSON.parse(await fs.readFile(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json"), "utf8"))
+    assert.notEqual(state.commands.web.pid, 99999999)
+
+    await runCli(["stop", "-p", "tilly", "-w", "feature-x", "web"], { cwd: root, stateRoot })
+  })
+
+  test("daemon failures include the underlying cause", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const missingCwd = path.join(root, "missing")
+
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "feature-x",
+      branch: null,
+      root,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command: "node -e 'setInterval(() => {}, 1000)'",
+          cwd: missingCwd,
+          log: path.join(root, "web.log"),
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: 99999999,
+        },
+      },
+    }))
+
+    const restart = await runCli(["restart", "--all"], { cwd: root, stateRoot })
+
+    assert.equal(restart.exitCode, 1)
+    assert.match(restart.stderr, /failed to spawn/)
+    assert.match(restart.stderr, /ENOENT/)
+  })
+
   test("up --create creates a worktree and runs setup with workspace env", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
