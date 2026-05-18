@@ -53,6 +53,63 @@ describe("cli", () => {
     assert.ok(result.stderr.includes("workspace feature-x does not exist"))
   })
 
+  test("ps aligns columns for long workspace names", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const pid = process.pid
+
+    await writeFile(path.join(stateRoot, "projects", "alkalye", "workspaces", "feat-i18n", "state.json"), JSON.stringify({
+      project: "alkalye",
+      workspace: "feat-i18n",
+      branch: null,
+      root,
+      commands: {
+        sync: {
+          id: "sync",
+          label: "sync",
+          command: "sync",
+          cwd: root,
+          log: path.join(root, "sync.log"),
+          url: "https://sync-feat-i18n-alkalye.localhost",
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid,
+        },
+      },
+    }))
+    await writeFile(path.join(stateRoot, "projects", "syntwin-mono", "workspaces", "fix-chat-flickering", "state.json"), JSON.stringify({
+      project: "syntwin-mono",
+      workspace: "fix-chat-flickering",
+      branch: null,
+      root,
+      commands: {
+        livekit: {
+          id: "livekit",
+          label: "livekit",
+          command: "livekit",
+          cwd: root,
+          log: path.join(root, "livekit.log"),
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid,
+        },
+      },
+    }))
+
+    const result = await runCli(["ps"], { cwd: root, stateRoot })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stderr, "")
+    assert.ok(!result.stdout.includes("\t"))
+
+    const lines = result.stdout.trimEnd().split("\n")
+    assert.equal(lines.length, 2)
+    assert.equal(lines[0].indexOf("sync"), lines[1].indexOf("livekit"))
+    assert.equal(lines[0].indexOf("process"), lines[1].indexOf("process"))
+    assert.equal(lines[0].indexOf(String(pid)), lines[1].indexOf(String(pid)))
+  })
+
   test("up --create creates a worktree and runs setup with workspace env", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")

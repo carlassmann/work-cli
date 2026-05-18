@@ -360,22 +360,31 @@ async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   const states = await listWorkspaceStates()
-  let count = 0
+  const rows: Array<Array<string>> = []
 
   for (const state of states) {
     for (const command of Object.values(state.commands)) {
-      count++
       const status = await commandRuntimeStatus(command)
       const handle = command.runner === "tmux" ? command.tmuxSession : command.pid
-      console.log(`${status}\t${state.project}/${state.workspace}\t${command.id}\t${command.runner}\t${handle}\t${command.url ?? ""}`)
+      rows.push([status, `${state.project}/${state.workspace}`, command.id, command.runner, String(handle), command.url ?? ""])
     }
   }
 
-  if (count === 0) {
+  if (rows.length === 0) {
     console.log("no tracked commands")
+  } else {
+    console.log(formatTable(rows))
   }
 
   return ok(undefined)
+}
+
+function formatTable(rows: Array<Array<string>>): string {
+  const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)))
+
+  return rows
+    .map((row) => row.map((cell, column) => cell.padEnd(widths[column])).join("  ").trimEnd())
+    .join("\n")
 }
 
 async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
