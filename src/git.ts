@@ -1,5 +1,5 @@
 import path from "node:path"
-import { exec, execOk } from "./shell.js"
+import { exec, execOk, existsAt } from "./shell.js"
 import { slugify } from "./names.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
@@ -55,6 +55,9 @@ export async function workspaceFromGit(cwd: string): Promise<Result<string>> {
 }
 
 export async function createWorktree(root: string, dir: string, branch: string, from?: string): Promise<Result<void>> {
+  const stale = await staleWorktreeRecord(root, dir, branch)
+  if (!stale.ok) return stale
+
   const exists = await execOk("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], root)
   const args = exists
     ? ["worktree", "add", dir, branch]
@@ -66,4 +69,46 @@ export async function createWorktree(root: string, dir: string, branch: string, 
   }
 
   return ok(undefined)
+}
+
+async function staleWorktreeRecord(root: string, dir: string, branch: string): Promise<Result<void>> {
+  const list = await exec("git", ["worktree", "list", "--porcelain"], root)
+  if (!list.ok) return errResult("GitError", `failed to inspect git worktrees from ${root}`, list.error)
+
+  const record = parseWorktreeList(list.value)
+    .find((item) => item.worktree === dir || item.branch === `refs/heads/${branch}`)
+
+  if (!record) return ok(undefined)
+  if (await existsAt(record.worktree)) return ok(undefined)
+
+  const reason = record.prunable ? ` (${record.prunable})` : ""
+  return errResult("GitError", [
+    `stale git worktree metadata for ${branch}: Git still tracks ${record.worktree}, but the directory is missing${reason}.`,
+    `Run: git -C ${root} worktree prune`,
+    "Then retry the work command.",
+  ].join("\n"))
+}
+
+function parseWorktreeList(output: string) {
+  const records: Array<{ worktree: string; branch?: string; prunable?: string }> = []
+  let current: { worktree: string; branch?: string; prunable?: string } | null = null
+
+  for (const line of output.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current) records.push(current)
+      current = { worktree: line.slice("worktree ".length) }
+      continue
+    }
+
+    if (!current) continue
+
+    if (line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length)
+    } else if (line.startsWith("prunable")) {
+      current.prunable = line.slice("prunable".length).trim()
+    }
+  }
+
+  if (current) records.push(current)
+  return records
 }
