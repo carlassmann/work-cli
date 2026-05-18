@@ -241,4 +241,3 @@ async function shutdown() {
   await fs.rm(daemonPidFile(), { force: true }).catch((cause) => debugLog("workd", `rm pid: ${describe(cause)}`))
   process.exit(0)
 }
-

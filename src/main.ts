@@ -16,7 +16,7 @@ import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
 import { ensurePortless, portlessUrl, usesPortless } from "./portless.js"
 import { commandExists, existsAt } from "./shell.js"
 import { daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
-import { debugLog, errResult, ok, tryAsync } from "./result.js"
+import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import type { Result } from "./result.js"
 import type { DevConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
 
@@ -40,19 +40,10 @@ type StateFilters = {
 const result = await main(process.argv.slice(2))
 
 if (!result.ok) {
-  console.error(result.error.message)
+  console.error(formatError(result.error, { debug: Boolean(process.env["WORK_DEBUG"]) }))
 
   if (process.env["WORK_DEBUG"]) {
     console.error(`[tag: ${result.error.tag}]`)
-
-    if (result.error.cause !== undefined) {
-      const cause = result.error.cause
-      if (cause instanceof Error) {
-        console.error(cause.stack ?? cause.message)
-      } else {
-        console.error(typeof cause === "string" ? cause : JSON.stringify(cause))
-      }
-    }
   }
 
   process.exitCode = 1
