@@ -20,7 +20,7 @@ export function slugify(value: string) {
 }
 
 export function routeName(project: string, workspace: string, command: string, override?: string) {
-  return `${override ?? command}.${workspace}.${project}`
+  return [override ?? command, workspace, project].join("-")
 }
 
 export function routeUrl(project: string, workspace: string, command: string, override?: string) {

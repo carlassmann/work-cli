@@ -47,8 +47,8 @@ work down feature-x          # tear it all down
 Routed commands get a stable URL of the form:
 
 ```
-{command}.{workspace}.{project}.localhost
-# e.g. web.feature-x.tilly.localhost, sync.feature-x.tilly.localhost
+{command}-{workspace}-{project}.localhost
+# e.g. web-feature-x-tilly.localhost, sync-feature-x-tilly.localhost
 ```
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
@@ -92,7 +92,7 @@ export default {
       route: true,
     },
     web: {
-      run: 'PUBLIC_JAZZ_SYNC_SERVER="wss://sync.${WORK_WORKSPACE}.tilly.localhost" astro dev --port "$PORT" --host "$HOST"',
+      run: 'PUBLIC_JAZZ_SYNC_SERVER="wss://sync-${WORK_WORKSPACE}-tilly.localhost" astro dev --port "$PORT" --host "$HOST"',
       autoStart: true,
       route: true,
     },
@@ -121,7 +121,7 @@ Day in the life:
 work up chat-streaming --create
 
 # Open the web app. Sync server is already wired up via the env var.
-open https://web.chat-streaming.tilly.localhost
+open https://web-chat-streaming-tilly.localhost
 
 # Park Claude Code in a tmux window for this workspace.
 work start claude -- claude --dangerously-skip-permissions

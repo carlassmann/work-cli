@@ -280,7 +280,7 @@ Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 URL shape:
-  {command}.{workspace}.{project}.localhost
+  {command}-{workspace}-{project}.localhost
 
 Empty state:
   no routed commands for <workspace>

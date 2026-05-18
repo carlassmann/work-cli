@@ -9,13 +9,13 @@ describe("names", () => {
   })
 
   test("derives canonical route names", () => {
-    assert.equal(routeName("tilly", "feature-x", "web"), "web.feature-x.tilly")
-    assert.equal(routeName("tilly", "feature-x", "web", "app"), "app.feature-x.tilly")
+    assert.equal(routeName("tilly", "feature-x", "web"), "web-feature-x-tilly")
+    assert.equal(routeName("tilly", "feature-x", "web", "app"), "app-feature-x-tilly")
   })
 
   test("derives canonical route urls", () => {
-    assert.equal(routeUrl("tilly", "feature-x", "web"), "https://web.feature-x.tilly.localhost")
-    assert.equal(routeUrl("tilly", "feature-x", "web", "app"), "https://app.feature-x.tilly.localhost")
+    assert.equal(routeUrl("tilly", "feature-x", "web"), "https://web-feature-x-tilly.localhost")
+    assert.equal(routeUrl("tilly", "feature-x", "web", "app"), "https://app-feature-x-tilly.localhost")
   })
 })
 

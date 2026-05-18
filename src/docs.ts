@@ -56,7 +56,7 @@ Command fields:
   autoStart           included in work up
   restart             "manual" or "on-exit"
   restartWhenChanged  reserved for file-watch restarts
-  route               true to publish a {command}.{workspace}.{project} URL
+  route               true to publish a {command}-{workspace}-{project} URL
   routeName           override the first URL segment (default: command id)
   portless            false disables portless wrapping
 
@@ -230,21 +230,21 @@ Setup behavior:
   work setup                     runs setup for the current workspace`,
 
   urls: `Canonical URL shape:
-  {command}.{workspace}.{project}.localhost
+  {command}-{workspace}-{project}.localhost
 
 Examples:
-  web.feature-x.tilly.localhost
-  sync.feature-x.tilly.localhost
-  api.fix-auth.my-app.localhost
+  web-feature-x-tilly.localhost
+  sync-feature-x-tilly.localhost
+  api-fix-auth-my-app.localhost
 
 With route: true:
   command id becomes first URL segment.
 
 With route: true, routeName: "app":
-  app.feature-x.tilly.localhost
+  app-feature-x-tilly.localhost
 
 Routed commands are started through portless:
-  portless web.feature-x.tilly sh -lc "bun run dev"`,
+  portless web-feature-x-tilly sh -lc "bun run dev"`,
 
   portless: `work coexists with portless like it coexists with git.
 
@@ -262,10 +262,10 @@ work owns:
   consistent route names
 
 For routed commands, work checks that portless exists, then starts:
-  portless {command}.{workspace}.{project} sh -lc "{run}"
+  portless {command}-{workspace}-{project} sh -lc "{run}"
 
 Example:
-  portless web.feature-x.tilly sh -lc "bun run dev"
+  portless web-feature-x-tilly sh -lc "bun run dev"
 
 Install:
   install portless and make sure it is on PATH

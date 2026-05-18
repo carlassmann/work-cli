@@ -18,18 +18,18 @@ describe("portless", () => {
   test("uses routeName override when set", () => {
     assert.deepEqual(spawnCommand(config, "feature-x", "web", { run: "bun run dev", route: true, routeName: "app" }), {
       executable: "portless",
-      args: ["app.feature-x.tilly", "sh", "-lc", "bun run dev"],
+      args: ["app-feature-x-tilly", "sh", "-lc", "bun run dev"],
       shell: false,
-      display: 'portless app.feature-x.tilly sh -lc "bun run dev"',
+      display: 'portless app-feature-x-tilly sh -lc "bun run dev"',
     })
   })
 
   test("wraps routed commands without depending on portless internals", () => {
     assert.deepEqual(spawnCommand(config, "feature-x", "web", { run: "bun run dev", route: true }), {
       executable: "portless",
-      args: ["web.feature-x.tilly", "sh", "-lc", "bun run dev"],
+      args: ["web-feature-x-tilly", "sh", "-lc", "bun run dev"],
       shell: false,
-      display: 'portless web.feature-x.tilly sh -lc "bun run dev"',
+      display: 'portless web-feature-x-tilly sh -lc "bun run dev"',
     })
   })
 
