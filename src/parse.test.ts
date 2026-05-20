@@ -56,6 +56,33 @@ describe("parseArgs", () => {
     }
   })
 
+  test("combined boolean aliases resolve to full names", () => {
+    const result = parseArgs(["-af"], {
+      flags: { all: booleanFlag("a"), follow: booleanFlag("f") },
+    })
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.value.flags.all, true)
+      assert.equal(result.value.flags.follow, true)
+    }
+  })
+
+  test("value flags accept equals syntax", () => {
+    const result = parseArgs(["--workspace=feature-x"], {
+      flags: { workspace: valueFlag("w") },
+    })
+    assert.equal(result.ok, true)
+    if (result.ok) assert.equal(result.value.flags.workspace, "feature-x")
+  })
+
+  test("value flags preserve equals in inline values", () => {
+    const result = parseArgs(["--workspace=fix=a"], {
+      flags: { workspace: valueFlag("w") },
+    })
+    assert.equal(result.ok, true)
+    if (result.ok) assert.equal(result.value.flags.workspace, "fix=a")
+  })
+
   test("rest collects args after -- when acceptRest is true", () => {
     const result = parseArgs(["claude", "--", "claude", "--debug"], { acceptRest: true })
     assert.equal(result.ok, true)
@@ -82,6 +109,23 @@ describe("parseArgs", () => {
 
   test("rejects value flags without a value", () => {
     const result = parseArgs(["--workspace"], { flags: { workspace: valueFlag() } })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.match(result.error.message, /missing value for --workspace/)
+  })
+
+  test("rejects flag-looking value flag values", () => {
+    const long = parseArgs(["--workspace", "-f"], { flags: { workspace: valueFlag("w"), follow: booleanFlag("f") } })
+    assert.equal(long.ok, false)
+    if (!long.ok) assert.match(long.error.message, /missing value for --workspace/)
+
+    const short = parseArgs(["-w", "-f"], { flags: { workspace: valueFlag("w"), follow: booleanFlag("f") } })
+    assert.equal(short.ok, false)
+    if (!short.ok) assert.match(short.error.message, /missing value for -w/)
+  })
+
+  test("rejects empty value flag values", () => {
+    const result = parseArgs(["--workspace="], { flags: { workspace: valueFlag("w") } })
+
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.error.message, /missing value for --workspace/)
   })

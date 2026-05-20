@@ -296,28 +296,34 @@ Config:
 
   work down [workspace]
   work down --all
-    stop all tracked commands for a workspace
+    stop tracked commands for a workspace, current project, or all projects
 
-  work start [-a] [-w workspace] <id> -- <command>
+  work start [-a] [workspace] <id> -- <command>
+  work exec [-a] [workspace] <id> -- <command>
+  work tmux [-a] [workspace] <id> -- <command>
     start an ad-hoc command in tmux
 
+  work attach [workspace] <id>
   work attach [-p project] [-w workspace] <id>
     attach to an ad-hoc tmux command
 
+  work stop [workspace] <id>
   work stop [-p project] [-w workspace] <id>
-    stop one tracked command
+    stop a tracked configured or ad-hoc command
 
+  work restart [workspace] <command>
   work restart [-p project] [-w workspace] <command>
     stop and start one configured or ad-hoc command
 
   work restart [-p project] [-w workspace] --all
-    stop and start all configured commands, or tracked commands outside a project
+    stop and start autoStart commands, or tracked commands outside a project
 
+  work run [workspace] <command>
   work run [-w workspace] <command>
     start one configured command, idempotently
 
   work ps [-a|--all]
-    list tracked commands for the current workspace, or all workspaces with -a
+    list tracked commands for the current workspace, or all tracked state outside a project
 
   work status
     alias for work ps
@@ -325,6 +331,7 @@ Config:
   work watch [-a|--all] [-n seconds]
     live-refresh the work ps table until interrupted
 
+  work logs [-f|--follow] [workspace] <command>
   work logs [-f|--follow] [-p project] [-w workspace] <command>
     print or stream captured stdout/stderr for one command
 
@@ -348,6 +355,9 @@ Config:
 
   work cd [workspace]
     print workspace root for shell cd
+
+  work help [command|topic]
+    show command help or topic help
 
   work docs [topic]
     show this reference`,

@@ -20,19 +20,23 @@ Commands:
   logs       Print or follow command logs.
   urls       List workspace URLs.
   start      Start an ad-hoc tmux command.
+  exec       Alias for start.
+  tmux       Alias for start.
   attach     Attach to an ad-hoc tmux command.
-  stop       Stop one tracked command.
+  stop       Stop a tracked configured or ad-hoc command.
   doctor     Check project setup.
   prune      Remove dead process records.
   daemon     Manage workd.
+  help       Show command help.
   docs       Show built-in reference docs.
   completions  Print shell completion script.
   shell-init   Print shell init (completion + cd wrapper).
   cd         Print workspace root for shell cd.
 
 The workspace is implied from the current git branch. Pass it explicitly
-as a positional to up/setup/down/urls/cd, or via -w to run/restart/logs/stop/attach/start.
-State-only commands also work outside a project; use ps -a or -p/-w if ambiguous.
+as a positional to up/setup/down/urls/cd/run/restart/logs/stop/attach/start,
+or via -w where supported.
+State-only commands also work outside a project; ps/status/watch show all tracked state there.
 
 Examples:
   work init tilly
@@ -41,10 +45,10 @@ Examples:
   work up feature-x --create
   work setup feature-x
   work run web
-  work run -w feature-x web
+  work run feature-x web
   work restart web
   work restart -w feature-x --all
-  work start claude -- claude
+  work exec claude -- claude
   work attach claude
   work logs -f claude
   work stop claude
@@ -141,7 +145,7 @@ Examples:
 
   down: `work down
 
-Stop all tracked commands for a workspace.
+Stop tracked commands for one workspace, or a broader scope with --all.
 
 Usage:
   work down [workspace]
@@ -151,7 +155,8 @@ Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 Options:
-  -a, --all                 Stop all tracked commands outside a project.
+  -a, --all                 Inside a project: stop tracked commands for this project.
+                            Outside a project: stop all tracked commands.
   -p, --project <name>      Filter tracked state by project.
 
 Examples:
@@ -165,6 +170,11 @@ Start an ad-hoc command in a detached tmux session.
 
 Usage:
   work start [-a] [-w workspace] <id> -- <command>
+  work start [-a] [workspace] <id> -- <command>
+  work exec [-a] [-w workspace] <id> -- <command>
+  work exec [-a] [workspace] <id> -- <command>
+  work tmux [-a] [-w workspace] <id> -- <command>
+  work tmux [-a] [workspace] <id> -- <command>
 
 Arguments:
   id           DNS-safe command id.
@@ -176,9 +186,12 @@ Options:
 
 Examples:
   work start claude -- claude
+  work exec claude -- claude
+  work tmux shell -- zsh
   work start --attach claude -- claude
   work start claude -- claude --dangerously-skip-permissions
   work start shell -- zsh
+  work start feature-x claude -- claude
   work start -w feature-x claude -- claude`,
 
   attach: `work attach
@@ -187,6 +200,7 @@ Attach to an ad-hoc tmux command.
 
 Usage:
   work attach [-p project] [-w workspace] <id>
+  work attach [workspace] <id>
 
 Options:
   -p, --project <name>      Target project when outside a project.
@@ -194,14 +208,16 @@ Options:
 
 Examples:
   work attach claude
+  work attach feature-x claude
   work attach -w feature-x claude`,
 
   stop: `work stop
 
-Stop one tracked command.
+Stop a tracked configured or ad-hoc command.
 
 Usage:
   work stop [-p project] [-w workspace] <id>
+  work stop [workspace] <id>
 
 Options:
   -p, --project <name>      Target project when outside a project.
@@ -209,13 +225,15 @@ Options:
 
 Examples:
   work stop claude
+  work stop feature-x claude
   work stop -w feature-x claude`,
 
   restart: `work restart
 
-Stop and start one configured or ad-hoc command, or all configured commands.
+Stop and start one configured or ad-hoc command, or autoStart commands with --all.
 
 Usage:
+  work restart [workspace] <command>
   work restart [-p project] [-w workspace] <command>
   work restart [-p project] [-w workspace] --all
 
@@ -225,11 +243,13 @@ Arguments:
 Options:
   -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
-  -a, --all                 Restart every autoStart command, or tracked commands outside a project.
+  -a, --all                 Inside a project: restart autoStart commands for the workspace.
+                            Outside a project: restart matching tracked commands.
 
 Examples:
   work restart web
   work restart claude
+  work restart feature-x web
   work restart -w feature-x web
   work restart --all
   work restart -w feature-x --all`,
@@ -239,6 +259,7 @@ Examples:
 Start one configured command.
 
 Usage:
+  work run [workspace] <command>
   work run [-w workspace] <command>
 
 Arguments:
@@ -253,11 +274,12 @@ Behavior:
 
 Examples:
   work run web
+  work run feature-x web
   work run -w feature-x web`,
 
   ps: `work ps [-a|--all]
 
-List tracked commands for the current workspace.
+List tracked commands for the current workspace, or all tracked state outside a project.
 
 Usage:
   work ps
@@ -291,7 +313,7 @@ Exit:
 
   status: `work status [-a|--all]
 
-List tracked commands for the current workspace.
+List tracked commands for the current workspace, or all tracked state outside a project.
 
 Usage:
   work status
@@ -308,6 +330,7 @@ Empty state:
 Print or follow captured stdout/stderr for one command.
 
 Usage:
+  work logs [-f] [workspace] <command>
   work logs [-f] [-p project] [-w workspace] <command>
 
 Arguments:
@@ -321,6 +344,7 @@ Options:
 Examples:
   work logs web
   work logs claude
+  work logs feature-x web
   work logs -w feature-x web
   work logs -f -w feature-x web`,
 
@@ -462,6 +486,18 @@ Examples:
   work cd
   work cd feature-x`,
 
+  help: `work help
+
+Show command help or built-in topic help.
+
+Usage:
+  work help [command|topic]
+
+Examples:
+  work help
+  work help run
+  work help config`,
+
   docs: `work docs
 
 Show built-in reference docs.
@@ -495,9 +531,17 @@ export function rootHelp() {
 }
 
 export function commandHelp(name: string) {
-  if (name in sections) {
-    return sections[name as HelpSection]
+  const section = helpSection(name)
+
+  if (section) {
+    return sections[section]
   }
 
   return sections.root
+}
+
+export function helpSection(name: string): HelpSection | null {
+  if (name === "exec" || name === "tmux") return "start"
+  if (name in sections) return name as HelpSection
+  return null
 }

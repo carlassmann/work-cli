@@ -74,12 +74,98 @@ describe("completions", () => {
 
   test("_complete returns static lists without config", async () => {
     const root = await tempDir()
-    const result = await runCli(["_complete", "docs-topics", "shells"], { cwd: root })
+    const result = await runCli(["_complete", "help-topics", "shells"], { cwd: root })
 
     assert.equal(result.exitCode, 0)
     const lines = result.stdout.trim().split("\n")
     assert.ok(lines.includes("config"))
+    assert.ok(lines.includes("run"))
     assert.ok(lines.includes("zsh"))
+  })
+
+  test("_complete returns state commands outside a configured project", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await writeFile(path.join(stateRoot, "projects", "demo", "workspaces", "feature-a", "state.json"), JSON.stringify({
+      project: "demo",
+      workspace: "feature-a",
+      branch: null,
+      root,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command: "web",
+          cwd: root,
+          log: path.join(root, "web.log"),
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: 99999999,
+        },
+        agent: {
+          id: "agent",
+          label: "agent",
+          command: "agent",
+          argv: ["sleep", "30"],
+          cwd: root,
+          log: path.join(root, "agent.log"),
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "tmux",
+          tmuxSession: "work-demo-feature-a",
+          tmuxWindow: "agent",
+        },
+      },
+    }))
+
+    const result = await runCli(["_complete", "workspaces", "commands", "adhoc"], { cwd: root, stateRoot })
+
+    assert.equal(result.exitCode, 0)
+    const lines = result.stdout.trim().split("\n")
+    assert.ok(lines.includes("feature-a"))
+    assert.ok(lines.includes("web"))
+    assert.ok(lines.includes("agent"))
+  })
+
+  test("_complete configured excludes state-only commands", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "demo",
+      commands: {
+        web: { run: "echo" },
+      },
+    }`)
+    await writeFile(path.join(stateRoot, "projects", "demo", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "demo",
+      workspace: "main",
+      branch: null,
+      root,
+      commands: {
+        agent: {
+          id: "agent",
+          label: "agent",
+          command: "agent",
+          argv: ["sleep", "30"],
+          cwd: root,
+          log: path.join(root, "agent.log"),
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "tmux",
+          tmuxSession: "work-demo-main",
+          tmuxWindow: "agent",
+        },
+      },
+    }))
+
+    const result = await runCli(["_complete", "configured"], { cwd: root, stateRoot })
+
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(result.stdout.trim().split("\n"), ["web"])
   })
 
   test("shell-init zsh includes wrapper and completion", async () => {

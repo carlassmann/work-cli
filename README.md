@@ -177,6 +177,7 @@ The workspace name is the slugified branch name. The worktree root is `$PWD`. No
 ```sh
 work --help              # all subcommands
 work <command> --help    # one subcommand
+work help run            # same help, command form
 work docs                # list built-in topics (config, urls, daemon, tmux, …)
 work docs config         # full config field reference
 work docs setup          # setup-hook env vars
