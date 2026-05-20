@@ -8,7 +8,7 @@ import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
 import { createWorktree, gitBranch, gitMainWorktree, gitRoot, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
-import { attachCommand, commandRuntimeStatus, stopCommand as stopTrackedCommand } from "./processes.js"
+import { attachCommand, commandDisplayStatus, stopCommand as stopTrackedCommand } from "./processes.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText } from "./docs.js"
 import { commandHelp, rootHelp } from "./help.js"
@@ -92,6 +92,7 @@ async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Resu
     case "restart":      return runRestart(args)
     case "ps":           return runPs(args)
     case "status":       return runPs(args)
+    case "watch":        return runWatch(args)
     case "logs":         return runLogs(args)
     case "urls":         return runUrls(args)
     case "start":        return runStart(args)
@@ -443,30 +444,103 @@ async function restartTracked(target: { project: string; workspace: string; comm
 }
 
 async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, { flags: { all: booleanFlag("a") } })
   if (!parsed.ok) return parsed
   if (parsed.value.positional.length > 0) {
     return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
   }
 
-  const states = await listWorkspaceStates()
+  const table = await trackedCommandTable(parsed.value.flags.all)
+  if (!table.ok) return table
+
+  console.log(table.value)
+  return ok(undefined)
+}
+
+async function runWatch(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args, { flags: { all: booleanFlag("a"), interval: valueFlag("n") } })
+  if (!parsed.ok) return parsed
+  if (parsed.value.positional.length > 0) {
+    return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
+  }
+
+  const intervalRaw = parsed.value.flags.interval
+  const intervalSec = intervalRaw === undefined ? 2 : Number(intervalRaw)
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    return errResult("CLIError", `invalid interval: ${intervalRaw}`)
+  }
+
+  const all = parsed.value.flags.all
+  let stopped = false
+  const stop = () => { stopped = true }
+  process.on("SIGINT", stop)
+  process.on("SIGTERM", stop)
+  process.on("SIGHUP", stop)
+
+  try {
+    while (!stopped) {
+      const table = await trackedCommandTable(all)
+      if (!table.ok) return table
+
+      const header = `work watch${all ? " -a" : ""}  every ${intervalSec}s  (ctrl-c to exit)`
+      process.stdout.write(`\x1b[H\x1b[2J\x1b[3J${header}\n\n${table.value}\n`)
+
+      await interruptibleSleep(intervalSec * 1000, () => stopped)
+    }
+  } finally {
+    process.off("SIGINT", stop)
+    process.off("SIGTERM", stop)
+    process.off("SIGHUP", stop)
+  }
+
+  return ok(undefined)
+}
+
+async function trackedCommandTable(all: boolean): Promise<Result<string>> {
+  const statesResult = all ? ok(await listWorkspaceStates()) : await currentWorkspaceStates()
+  if (!statesResult.ok) return statesResult
+
   const rows: Array<Array<string>> = []
 
-  for (const state of states) {
+  for (const state of statesResult.value) {
     for (const command of Object.values(state.commands)) {
-      const status = await commandRuntimeStatus(command)
+      const status = await commandDisplayStatus(command)
       const handle = command.runner === "tmux" ? command.tmuxSession : command.pid
       rows.push([status, `${state.project}/${state.workspace}`, command.id, command.runner, String(handle), command.url ?? ""])
     }
   }
 
   if (rows.length === 0) {
-    console.log("no tracked commands")
-  } else {
-    console.log(formatTable(rows))
+    return ok("no tracked commands")
   }
 
-  return ok(undefined)
+  return ok(formatTable(rows))
+}
+
+function interruptibleSleep(ms: number, stopped: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const start = Date.now()
+    const tick = () => {
+      const remaining = ms - (Date.now() - start)
+      if (stopped() || remaining <= 0) {
+        resolve()
+        return
+      }
+      setTimeout(tick, Math.min(100, remaining))
+    }
+    tick()
+  })
+}
+
+async function currentWorkspaceStates(): Promise<Result<Array<WorkspaceState>>> {
+  const ctx = await loadProjectContext()
+  if (!ctx.ok) return ctx
+
+  const workspace = await defaultWorkspace(ctx.value.cwdRoot)
+  const state = await readWorkspaceState(ctx.value.config.project, workspace)
+  if (!state.ok) return state
+
+  return ok(state.value ? [state.value] : [])
 }
 
 function formatTable(rows: Array<Array<string>>): string {
@@ -573,7 +647,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runStart(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w") }, acceptRest: true })
+  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), attach: booleanFlag("a") }, acceptRest: true })
   if (!parsed.ok) return parsed
 
   const id = parsed.value.positional[0]
@@ -603,7 +677,12 @@ async function runStart(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   printTmuxStart(response.value.data.started ? "started" : "already up", id, record.tmuxSession)
-  return ok(undefined)
+
+  if (!parsed.value.flags.attach) {
+    return ok(undefined)
+  }
+
+  return attachCommand(ctx.value.config.project, workspace.value.workspace, id)
 }
 
 async function runAttach(args: ReadonlyArray<string>): Promise<Result<void>> {

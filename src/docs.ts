@@ -186,6 +186,7 @@ tmux owns:
 
 Start:
   work start claude -- claude
+  work start --attach claude -- claude
   work start claude -- claude --dangerously-skip-permissions
   work start shell -- zsh
   work start -w feature-x claude -- claude
@@ -297,7 +298,7 @@ Config:
   work down --all
     stop all tracked commands for a workspace
 
-  work start [-w workspace] <id> -- <command>
+  work start [-a] [-w workspace] <id> -- <command>
     start an ad-hoc command in tmux
 
   work attach [-p project] [-w workspace] <id>
@@ -315,11 +316,14 @@ Config:
   work run [-w workspace] <command>
     start one configured command, idempotently
 
-  work ps
-    list tracked commands across projects
+  work ps [-a|--all]
+    list tracked commands for the current workspace, or all workspaces with -a
 
   work status
     alias for work ps
+
+  work watch [-a|--all] [-n seconds]
+    live-refresh the work ps table until interrupted
 
   work logs [-f|--follow] [-p project] [-w workspace] <command>
     print or stream captured stdout/stderr for one command

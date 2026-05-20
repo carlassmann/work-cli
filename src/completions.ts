@@ -175,6 +175,7 @@ _work() {
     'restart:Restart commands'
     'ps:List tracked commands'
     'status:Alias for ps'
+    'watch:Live-refresh the ps table'
     'logs:Print or follow command logs'
     'urls:List workspace URLs'
     'start:Start an ad-hoc tmux command'
@@ -191,7 +192,7 @@ _work() {
 
   if (( CURRENT == 2 )); then
     _describe 'work command' subcommands
-    return
+    return 0
   fi
 
   local cmd=$words[2]
@@ -221,12 +222,15 @@ _work() {
       (( pos == 1 )) && _work_emit shells
       ;;
   esac
+
+  return 0
 }
 
 _work_emit() {
   local -a items
   items=("\${(@f)$(work _complete "$@" 2>/dev/null)}")
   _describe 'value' items
+  return 0
 }
 
 if (( $+functions[compdef] )); then
@@ -240,7 +244,7 @@ const bashScript = `_work() {
   cmd="\${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "init create up setup down run restart ps status logs urls start attach stop doctor prune daemon docs completions shell-init cd" -- "$cur") )
+    COMPREPLY=( $(compgen -W "init create up setup down run restart ps status watch logs urls start attach stop doctor prune daemon docs completions shell-init cd" -- "$cur") )
     return
   fi
 

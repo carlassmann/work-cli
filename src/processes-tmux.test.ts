@@ -2,7 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { commandRuntimeStatus, startAdhocCommand, stopCommand } from "./processes.js"
+import { commandDisplayStatus, commandRuntimeStatus, startAdhocCommand, stopCommand } from "./processes.js"
 import { readWorkspaceState } from "./state.js"
 import { tempDir } from "./test-helpers.js"
 import type { DevConfig, WorkspaceRecord } from "./types.js"
@@ -53,6 +53,46 @@ describe("tmux integration (fake)", () => {
     assert.equal(second.value.record.tmuxSession, "work-tilly-feature-x")
     assert.equal(first.value.record.tmuxWindow, "one")
     assert.equal(second.value.record.tmuxWindow, "two")
+  })
+
+  test("starts tmux commands for multiple workspaces in parallel", async () => {
+    const root = await tempDir()
+    const featureX: WorkspaceRecord = { ...workspace, workspace: "feature-x", branch: "feature-x", root: path.join(root, "feature-x") }
+    const featureY: WorkspaceRecord = { ...workspace, workspace: "feature-y", branch: "feature-y", root: path.join(root, "feature-y") }
+
+    await fs.mkdir(featureX.root, { recursive: true })
+    await fs.mkdir(featureY.root, { recursive: true })
+
+    const [startedX, startedY] = await Promise.all([
+      startAdhocCommand(config, featureX, "agent", ["sleep", "30"]),
+      startAdhocCommand(config, featureY, "agent", ["sleep", "30"]),
+    ])
+
+    assert.equal(startedX.ok, true)
+    assert.equal(startedY.ok, true)
+    if (!startedX.ok || !startedY.ok) return
+
+    assert.equal(startedX.value.started, true)
+    assert.equal(startedY.value.started, true)
+    assert.equal(startedX.value.record.tmuxSession, "work-tilly-feature-x")
+    assert.equal(startedY.value.record.tmuxSession, "work-tilly-feature-y")
+    assert.equal(startedX.value.record.tmuxWindow, "agent")
+    assert.equal(startedY.value.record.tmuxWindow, "agent")
+    assert.equal(await commandRuntimeStatus(startedX.value.record), "up")
+    assert.equal(await commandRuntimeStatus(startedY.value.record), "up")
+
+    const stateX = await readWorkspaceState("tilly", "feature-x")
+    const stateY = await readWorkspaceState("tilly", "feature-y")
+    assert.equal(stateX.ok, true)
+    assert.equal(stateY.ok, true)
+    if (!stateX.ok || !stateY.ok) return
+
+    assert.equal(stateX.value?.commands["agent"]?.runner, "tmux")
+    assert.equal(stateY.value?.commands["agent"]?.runner, "tmux")
+
+    const calls = await fs.readFile(path.join(process.env["WORK_TMUX_STATE_DIR"] as string, "calls.log"), "utf8")
+    assert.ok(calls.includes("new-session -d -s work-tilly-feature-x"))
+    assert.ok(calls.includes("new-session -d -s work-tilly-feature-y"))
   })
 
   test("stopping one command kills its window but keeps the session", async () => {
@@ -112,5 +152,20 @@ describe("tmux integration (fake)", () => {
     const calls = await fs.readFile(path.join(process.env["WORK_TMUX_STATE_DIR"] as string, "calls.log"), "utf8")
     assert.ok(calls.includes("pipe-pane"), `expected pipe-pane in calls, got:\n${calls}`)
     assert.ok(calls.includes("new-session"))
+  })
+
+  test("tmux display status uses recent log activity", async () => {
+    const root = await tempDir()
+    const ws: WorkspaceRecord = { ...workspace, root }
+
+    const started = await startAdhocCommand(config, ws, "one", ["sleep", "30"])
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+
+    assert.equal(await commandDisplayStatus(started.value.record), "idle")
+
+    await fs.writeFile(started.value.record.log, "working\n")
+
+    assert.equal(await commandDisplayStatus(started.value.record), "busy")
   })
 })

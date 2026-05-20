@@ -12,6 +12,7 @@ import type { Result } from "./result.js"
 import type { CommandRecord, DevConfig, ProcessCommandRecord, TmuxCommandRecord, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const execFileAsync = promisify(execFile)
+const TMUX_BUSY_THRESHOLD_MS = 30_000
 
 
 export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string): Promise<Result<{ record: ProcessCommandRecord; started: boolean }>> {
@@ -261,6 +262,22 @@ export async function commandRuntimeStatus(command: CommandRecord): Promise<"up"
   }
 
   return isPidRunning(command.pid) ? "up" : "dead"
+}
+
+export async function commandDisplayStatus(command: CommandRecord): Promise<"up" | "busy" | "idle" | "dead"> {
+  const status = await commandRuntimeStatus(command)
+  if (status === "dead" || command.runner !== "tmux") return status
+
+  return await tmuxActivityStatus(command.log)
+}
+
+async function tmuxActivityStatus(log: string): Promise<"busy" | "idle"> {
+  try {
+    const stat = await fsp.stat(log)
+    return stat.size > 0 && Date.now() - stat.mtimeMs <= TMUX_BUSY_THRESHOLD_MS ? "busy" : "idle"
+  } catch {
+    return "idle"
+  }
 }
 
 export async function startAdhocCommand(config: DevConfig, workspace: WorkspaceRecord, id: string, command: Array<string>): Promise<Result<{ record: TmuxCommandRecord; started: boolean }>> {

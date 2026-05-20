@@ -13,6 +13,7 @@ describe("completions", () => {
     assert.ok(result.stdout.includes("#compdef work"))
     assert.ok(result.stdout.includes("'up:Start workspace commands'"))
     assert.ok(result.stdout.includes("compdef _work work"))
+    assert.ok(result.stdout.includes("return 0"))
   })
 
   test("emits bash script with complete -F", async () => {
@@ -31,6 +32,15 @@ describe("completions", () => {
 
     assert.equal(result.exitCode, 1)
     assert.ok(result.stderr.includes("unsupported shell"))
+  })
+
+  test("help creates completion directories before redirecting", async () => {
+    const root = await tempDir()
+    const result = await runCli(["completions", "--help"], { cwd: root })
+
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("mkdir -p ~/.zsh/completions"))
+    assert.ok(result.stdout.includes("mkdir -p ~/.local/share/bash-completion/completions"))
   })
 
   test("_complete returns workspaces from worktree dir and configured commands", async () => {

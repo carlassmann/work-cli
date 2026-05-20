@@ -125,7 +125,7 @@ work up chat-streaming --create
 open https://web-chat-streaming-tilly.localhost
 
 # Park Claude Code in a tmux window for this workspace.
-work start claude -- claude --dangerously-skip-permissions
+work start --attach claude -- claude --dangerously-skip-permissions
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
 work up image-uploads --create
@@ -147,7 +147,10 @@ work down chat-streaming
 At any moment:
 
 ```sh
-work ps           # what's running everywhere
+work ps           # what's running here
+work ps -a        # what's running everywhere
+work watch        # live-refresh the ps table
+work watch -a     # live-refresh everything
 work urls         # routed URLs for the current workspace
 work doctor       # diagnose anything broken
 ```

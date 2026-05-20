@@ -27,12 +27,14 @@ export async function initGitRepo(root: string) {
   await writeFile(path.join(root, "README.md"), "# test\n")
   await git(["add", "README.md"], root)
   await git(["commit", "-m", "init"], root)
+  await git(["branch", "-M", "main"], root)
 }
 
-export async function runCli(args: Array<string>, options: { cwd: string; stateRoot?: string }) {
+export async function runCli(args: Array<string>, options: { cwd: string; stateRoot?: string; env?: NodeJS.ProcessEnv }) {
   const env = {
     ...process.env,
     WORK_STATE_ROOT: options.stateRoot ?? await tempDir("work-cli-state-"),
+    ...options.env,
   }
 
   try {

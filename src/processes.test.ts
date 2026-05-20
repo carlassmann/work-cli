@@ -1,3 +1,4 @@
+import fs from "node:fs/promises"
 import path from "node:path"
 import { afterEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
@@ -45,6 +46,47 @@ describe("process lifecycle", () => {
     if (afterStop.ok) assert.equal(afterStop.value?.commands["web"], undefined)
   })
 
+  test("starts detached commands for multiple workspaces in parallel", async () => {
+    const root = await tempDir()
+    const config = testConfig("node -e 'setTimeout(() => {}, 30000)'")
+    const featureX = testWorkspace(path.join(root, "feature-x"), "feature-x")
+    const featureY = testWorkspace(path.join(root, "feature-y"), "feature-y")
+
+    await Promise.all([
+      fs.mkdir(featureX.root, { recursive: true }),
+      fs.mkdir(featureY.root, { recursive: true }),
+    ])
+
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+
+    const [startedX, startedY] = await Promise.all([
+      startCommand(config, featureX, "web"),
+      startCommand(config, featureY, "web"),
+    ])
+
+    assert.equal(startedX.ok, true)
+    assert.equal(startedY.ok, true)
+    if (!startedX.ok || !startedY.ok) return
+
+    assert.equal(startedX.value.started, true)
+    assert.equal(startedY.value.started, true)
+    assert.notEqual(startedX.value.record.pid, startedY.value.record.pid)
+    assert.equal(await commandRuntimeStatus(startedX.value.record), "up")
+    assert.equal(await commandRuntimeStatus(startedY.value.record), "up")
+
+    const stateX = await readWorkspaceState("tilly", "feature-x")
+    const stateY = await readWorkspaceState("tilly", "feature-y")
+    assert.equal(stateX.ok, true)
+    assert.equal(stateY.ok, true)
+    if (!stateX.ok || !stateY.ok) return
+
+    assert.equal(stateX.value?.commands["web"]?.runner, "process")
+    assert.equal(stateY.value?.commands["web"]?.runner, "process")
+
+    await stopCommand("tilly", "feature-x", "web")
+    await stopCommand("tilly", "feature-y", "web")
+  })
+
   test("prunes dead command records", async () => {
     const root = await tempDir()
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
@@ -74,11 +116,11 @@ describe("process lifecycle", () => {
   })
 })
 
-function testWorkspace(root: string): WorkspaceRecord {
+function testWorkspace(root: string, workspace = "feature-x"): WorkspaceRecord {
   return {
     project: "tilly",
-    workspace: "feature-x",
-    branch: "feature-x",
+    workspace,
+    branch: workspace,
     root,
   }
 }

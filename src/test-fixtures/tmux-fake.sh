@@ -78,7 +78,7 @@ case "$CMD" in
     ls "$DIR/sessions/$SNAME/windows"
     ;;
 
-  pipe-pane|select-window)
+  attach-session|pipe-pane|select-window)
     # Recorded in calls.log; nothing else to do.
     ;;
 

@@ -16,6 +16,7 @@ Commands:
   restart    Restart commands.
   ps         List tracked commands.
   status     Alias for ps.
+  watch      Live-refresh the ps table.
   logs       Print or follow command logs.
   urls       List workspace URLs.
   start      Start an ad-hoc tmux command.
@@ -31,7 +32,7 @@ Commands:
 
 The workspace is implied from the current git branch. Pass it explicitly
 as a positional to up/setup/down/urls/cd, or via -w to run/restart/logs/stop/attach/start.
-State-only commands also work outside a project; use -p/-w if ambiguous.
+State-only commands also work outside a project; use ps -a or -p/-w if ambiguous.
 
 Examples:
   work init tilly
@@ -163,17 +164,19 @@ Examples:
 Start an ad-hoc command in a detached tmux session.
 
 Usage:
-  work start [-w workspace] <id> -- <command>
+  work start [-a] [-w workspace] <id> -- <command>
 
 Arguments:
   id           DNS-safe command id.
   command      Command to run.
 
 Options:
+  -a, --attach              Attach after starting.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
   work start claude -- claude
+  work start --attach claude -- claude
   work start claude -- claude --dangerously-skip-permissions
   work start shell -- zsh
   work start -w feature-x claude -- claude`,
@@ -252,25 +255,47 @@ Examples:
   work run web
   work run -w feature-x web`,
 
-  ps: `work ps
+  ps: `work ps [-a|--all]
 
-List tracked commands across all known workspaces.
+List tracked commands for the current workspace.
 
 Usage:
   work ps
+  work ps -a
 
 Output:
   status    project/workspace    command    runner    handle    url
 
+Status:
+  process commands show up/dead
+  tmux commands show busy/idle/dead
+
 Empty state:
   no tracked commands`,
 
-  status: `work status
+  watch: `work watch [-a|--all] [-n seconds]
 
-List tracked commands across all known workspaces.
+Live-refresh the work ps table until interrupted.
+
+Usage:
+  work watch
+  work watch -a
+  work watch -n 5
+
+Options:
+  -a, --all                 Show tracked commands across all workspaces.
+  -n, --interval <seconds>  Refresh interval. Defaults to 2.
+
+Exit:
+  ctrl-c`,
+
+  status: `work status [-a|--all]
+
+List tracked commands for the current workspace.
 
 Usage:
   work status
+  work status -a
 
 Output:
   status    project/workspace    command    runner    handle    url
@@ -376,12 +401,14 @@ Arguments:
   shell    bash or zsh.
 
 Install (zsh):
+  mkdir -p ~/.zsh/completions
   work completions zsh > ~/.zsh/completions/_work
   # add to ~/.zshrc:
   #   fpath=(~/.zsh/completions $fpath)
   #   autoload -U compinit && compinit
 
 Install (bash):
+  mkdir -p ~/.local/share/bash-completion/completions
   work completions bash > ~/.local/share/bash-completion/completions/work
   # or source it directly:
   #   source <(work completions bash)
