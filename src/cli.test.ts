@@ -628,7 +628,7 @@ describe("cli", () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
     const setupFile = path.join(root, "setup-env.json")
-    const setupCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, JSON.stringify({ project: process.env.WORK_PROJECT, workspace: process.env.WORK_WORKSPACE, root: process.env.WORK_ROOT }))'`
+    const setupCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, JSON.stringify({ project: process.env.WORK_PROJECT, workspace: process.env.WORK_WORKSPACE, root: process.env.WORK_ROOT, web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS, wsUrls: process.env.WORK_WS_URLS }))'`
 
     await initGitRepo(root)
     await writeFile(path.join(root, "work.config.js"), `export default {
@@ -637,7 +637,10 @@ describe("cli", () => {
           dir: "worktrees",
           setup: ${JSON.stringify(setupCommand)},
         },
-        commands: {},
+        commands: {
+          web: { run: "echo web", route: true },
+          sync: { run: "echo sync", route: true },
+        },
       }`)
 
     const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot })
@@ -649,6 +652,19 @@ describe("cli", () => {
       project: "tilly",
       workspace: "feature-x",
       root: await fs.realpath(path.join(root, "worktrees", "feature-x")),
+      web: "https://web-feature-x-tilly.localhost",
+      sync: "https://sync-feature-x-tilly.localhost",
+      syncWs: "wss://sync-feature-x-tilly.localhost",
+    })
+
+    const env = JSON.parse(await fs.readFile(setupFile, "utf8"))
+    assert.deepEqual(JSON.parse(env.urls), {
+      web: "https://web-feature-x-tilly.localhost",
+      sync: "https://sync-feature-x-tilly.localhost",
+    })
+    assert.deepEqual(JSON.parse(env.wsUrls), {
+      web: "wss://web-feature-x-tilly.localhost",
+      sync: "wss://sync-feature-x-tilly.localhost",
     })
   })
 })

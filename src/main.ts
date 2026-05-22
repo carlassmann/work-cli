@@ -13,7 +13,7 @@ import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state
 import { docsText } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
-import { ensurePortless, portlessUrl, usesPortless } from "./portless.js"
+import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
 import { commandExists, existsAt } from "./shell.js"
 import { daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
@@ -1138,21 +1138,13 @@ async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspac
 }
 
 function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: WorkspaceRecord) {
-  const urls = Object.fromEntries(
-    Object.entries(config.commands)
-      .map(([id, command]) => [id, portlessUrl(config, workspace.workspace, id, command)])
-      .filter((entry): entry is [string, string] => Boolean(entry[1])),
-  )
-
   return {
     WORK_PROJECT: config.project,
     WORK_WORKSPACE: workspace.workspace,
     WORK_ROOT: workspace.root,
     WORK_SOURCE_ROOT: sourceRoot,
     WORK_BRANCH: workspace.branch ?? "",
-    WORK_URL: urls.web ?? "",
-    WORK_WEB_URL: urls.web ?? "",
-    WORK_URLS: JSON.stringify(urls),
+    ...routeEnvironmentForConfig(config, workspace.workspace),
   }
 }
 

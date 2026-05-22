@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { spawnCommand, usesPortless } from "./portless.js"
+import { routeEnvironmentForConfig, spawnCommand, usesPortless, websocketUrl } from "./portless.js"
 import type { DevConfig } from "./types.js"
 
 const config: DevConfig = {
@@ -40,5 +40,35 @@ describe("portless", () => {
       shell: true,
       display: "bun run test",
     })
+  })
+
+  test("exports full semantic URLs for routed commands", () => {
+    const env = routeEnvironmentForConfig({
+      project: "tilly",
+      commands: {
+        web: { run: "bun run dev", route: true },
+        sync: { run: "bun run sync", route: true },
+        worker: { run: "bun run worker" },
+      },
+    }, "feature-x")
+
+    assert.equal(env.WORK_URL, "https://web-feature-x-tilly.localhost")
+    assert.equal(env.WORK_WEB_URL, "https://web-feature-x-tilly.localhost")
+    assert.equal(env.WORK_WEB_WS_URL, "wss://web-feature-x-tilly.localhost")
+    assert.equal(env.WORK_SYNC_URL, "https://sync-feature-x-tilly.localhost")
+    assert.equal(env.WORK_SYNC_WS_URL, "wss://sync-feature-x-tilly.localhost")
+    assert.deepEqual(JSON.parse(env.WORK_URLS), {
+      web: "https://web-feature-x-tilly.localhost",
+      sync: "https://sync-feature-x-tilly.localhost",
+    })
+    assert.deepEqual(JSON.parse(env.WORK_WS_URLS), {
+      web: "wss://web-feature-x-tilly.localhost",
+      sync: "wss://sync-feature-x-tilly.localhost",
+    })
+  })
+
+  test("converts http URLs to websocket URLs", () => {
+    assert.equal(websocketUrl("http://web.local"), "ws://web.local")
+    assert.equal(websocketUrl("https://web.local"), "wss://web.local")
   })
 })

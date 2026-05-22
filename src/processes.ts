@@ -6,7 +6,7 @@ import { promisify } from "node:util"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { routeName, routeUrl } from "./names.js"
-import { portlessUrl, spawnCommand } from "./portless.js"
+import { portlessUrl, routeEnvironment, routeEnvironmentForConfig, spawnCommand } from "./portless.js"
 import { commandExists, isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
 import type { CommandRecord, DevConfig, ProcessCommandRecord, TmuxCommandRecord, WorkspaceRecord, WorkspaceState } from "./types.js"
@@ -52,6 +52,7 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
       WORK_PROJECT: config.project,
       WORK_WORKSPACE: workspace.workspace,
       WORK_COMMAND: id,
+      ...routeEnvironmentForConfig(config, workspace.workspace),
       ...command.env,
     },
   })
@@ -160,6 +161,7 @@ export async function restartTrackedCommand(project: string, workspace: string, 
       WORK_PROJECT: project,
       WORK_WORKSPACE: workspace,
       WORK_COMMAND: id,
+      ...routeEnvironment(stateRouteUrls(state)),
     },
   })
   if (!spawned.ok) return spawned
@@ -185,6 +187,14 @@ export async function restartTrackedCommand(project: string, workspace: string, 
   }
 
   return ok({ record, started: true })
+}
+
+function stateRouteUrls(state: WorkspaceState) {
+  return Object.fromEntries(
+    Object.entries(state.commands)
+      .map(([id, command]) => [id, command.url])
+      .filter((entry): entry is [string, string] => Boolean(entry[1])),
+  )
 }
 
 function trackedProcessCommand(state: WorkspaceState, command: ProcessCommandRecord) {

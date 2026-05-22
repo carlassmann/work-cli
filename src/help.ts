@@ -137,7 +137,10 @@ Environment:
   WORK_BRANCH        Workspace branch, if known.
   WORK_URL           Web URL when a web route exists.
   WORK_WEB_URL       Same as WORK_URL.
+  WORK_<ID>_URL      Full URL for each routed command id.
+  WORK_<ID>_WS_URL   WebSocket URL for each routed command id.
   WORK_URLS          JSON object of routed command URLs.
+  WORK_WS_URLS       JSON object of routed command WebSocket URLs.
 
 Examples:
   work setup

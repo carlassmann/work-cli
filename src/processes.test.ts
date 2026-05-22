@@ -87,6 +87,43 @@ describe("process lifecycle", () => {
     await stopCommand("tilly", "feature-y", "web")
   })
 
+  test("passes route URLs to configured commands", async () => {
+    const root = await tempDir()
+    const workspace = testWorkspace(root)
+    const output = path.join(root, "env.json")
+    const command = `node -e 'require("fs").writeFileSync(${JSON.stringify(output)}, JSON.stringify({ web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS }))'`
+    const config: DevConfig = {
+      project: "tilly",
+      commands: {
+        web: {
+          run: command,
+          route: true,
+          portless: false,
+        },
+        sync: {
+          run: "echo sync",
+          route: true,
+        },
+      },
+    }
+
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+
+    const started = await startCommand(config, workspace, "web")
+    assert.equal(started.ok, true)
+
+    const env = JSON.parse(await readSoon(output))
+    assert.deepEqual(env, {
+      web: "https://web-feature-x-tilly.localhost",
+      sync: "https://sync-feature-x-tilly.localhost",
+      syncWs: "wss://sync-feature-x-tilly.localhost",
+      urls: JSON.stringify({
+        web: "https://web-feature-x-tilly.localhost",
+        sync: "https://sync-feature-x-tilly.localhost",
+      }),
+    })
+  })
+
   test("prunes dead command records", async () => {
     const root = await tempDir()
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
@@ -115,6 +152,20 @@ describe("process lifecycle", () => {
     assert.deepEqual((await listWorkspaceStates())[0]?.commands, {})
   })
 })
+
+async function readSoon(file: string) {
+  const deadline = Date.now() + 2_000
+
+  while (Date.now() < deadline) {
+    try {
+      return await fs.readFile(file, "utf8")
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  return await fs.readFile(file, "utf8")
+}
 
 function testWorkspace(root: string, workspace = "feature-x"): WorkspaceRecord {
   return {

@@ -110,9 +110,14 @@ export default {
 | `WORK_WORKSPACE`   | slugified branch name                                    |
 | `WORK_PROJECT`     | project slug from config                                 |
 | `WORK_URL`         | primary routed URL (the `web` command, if routed)        |
+| `WORK_WEB_URL`     | same as `WORK_URL`                                       |
+| `WORK_SYNC_URL`    | full URL for the `sync` command, if routed               |
+| `WORK_SYNC_WS_URL` | WebSocket URL for the `sync` command, if routed          |
 | `WORK_URLS`        | JSON of all routed URLs, keyed by command id             |
+| `WORK_WS_URLS`     | JSON of WebSocket URLs, keyed by command id              |
 
 `WORK_SOURCE_ROOT` always resolves to the main worktree via `git worktree list`, so it works the same whether you ran `work` from the main repo or from another worktree.
+Configured commands receive the same routed URL variables.
 
 Day in the life:
 

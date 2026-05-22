@@ -72,7 +72,10 @@ Setup hook environment:
   WORK_BRANCH         workspace branch, if known
   WORK_URL            web URL when a web route exists
   WORK_WEB_URL        same as WORK_URL
-  WORK_URLS           JSON object of routed command URLs`,
+  WORK_<ID>_URL       full URL for each routed command id
+  WORK_<ID>_WS_URL    WebSocket URL for each routed command id
+  WORK_URLS           JSON object of routed command URLs
+  WORK_WS_URLS        JSON object of routed command WebSocket URLs`,
 
   setup: `Setup hooks prepare a workspace before commands start.
 
@@ -98,7 +101,12 @@ Environment:
   WORK_BRANCH         workspace branch, if known
   WORK_URL            web URL when a web route exists
   WORK_WEB_URL        same as WORK_URL
+  WORK_<ID>_URL       full URL for each routed command id
+  WORK_<ID>_WS_URL    WebSocket URL for each routed command id
   WORK_URLS           JSON object of routed command URLs
+  WORK_WS_URLS        JSON object of routed command WebSocket URLs
+
+Configured commands receive the same routed URL variables.
 
 Typical setup work:
   copy or generate .env.local
