@@ -323,14 +323,15 @@ _work_emit() {
 _work_emit_flags() {
   local -a flags
   case "$1" in
-    up) flags=(--create --no-create) ;;
+    up) flags=(--create --no-create --lan --no-tls --ip) ;;
     down) flags=(-a --all -p --project) ;;
-    run) flags=(-w --workspace) ;;
-    restart) flags=(-a --all -p --project -w --workspace) ;;
+    setup) flags=(--lan --no-tls --ip) ;;
+    run) flags=(-w --workspace --lan --no-tls --ip) ;;
+    restart) flags=(-a --all -p --project -w --workspace --lan --no-tls --ip) ;;
     ps|status) flags=(-a --all) ;;
     watch) flags=(-a --all -n --interval) ;;
     logs) flags=(-f --follow -p --project -w --workspace) ;;
-    urls) flags=(-p --project) ;;
+    urls) flags=(-p --project --lan --no-tls --ip) ;;
     start|exec|tmux) flags=(-a --attach -w --workspace) ;;
     attach|stop) flags=(-p --project -w --workspace) ;;
     *) flags=() ;;
@@ -349,10 +350,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval)
+      -w|--workspace|-p|--project|-n|--interval|--ip)
         (( i += 2 ))
         ;;
-      --workspace=*|--project=*|--interval=*)
+      --workspace=*|--project=*|--interval=*|--ip=*)
         (( i++ ))
         ;;
       -*)
@@ -380,10 +381,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval)
+      -p|--project|-n|--interval|--ip)
         (( i += 2 ))
         ;;
-      --project=*|--interval=*)
+      --project=*|--interval=*|--ip=*)
         (( i++ ))
         ;;
       *)
@@ -556,14 +557,15 @@ complete -F _work work
 
 _work_flags() {
   case "$1" in
-    up) echo "--create --no-create -h --help" ;;
+    up) echo "--create --no-create --lan --no-tls --ip -h --help" ;;
     down) echo "-a --all -p --project -h --help" ;;
-    run) echo "-w --workspace -h --help" ;;
-    restart) echo "-a --all -p --project -w --workspace -h --help" ;;
+    setup) echo "--lan --no-tls --ip -h --help" ;;
+    run) echo "-w --workspace --lan --no-tls --ip -h --help" ;;
+    restart) echo "-a --all -p --project -w --workspace --lan --no-tls --ip -h --help" ;;
     ps|status) echo "-a --all -h --help" ;;
     watch) echo "-a --all -n --interval -h --help" ;;
     logs) echo "-f --follow -p --project -w --workspace -h --help" ;;
-    urls) echo "-p --project -h --help" ;;
+    urls) echo "-p --project --lan --no-tls --ip -h --help" ;;
     start|exec|tmux) echo "-a --attach -w --workspace -h --help" ;;
     attach|stop) echo "-p --project -w --workspace -h --help" ;;
     *) echo "-h --help" ;;
@@ -579,10 +581,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval)
+      -w|--workspace|-p|--project|-n|--interval|--ip)
         i=$((i + 2))
         ;;
-      --workspace=*|--project=*|--interval=*)
+      --workspace=*|--project=*|--interval=*|--ip=*)
         i=$((i + 1))
         ;;
       -*)
@@ -610,10 +612,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval)
+      -p|--project|-n|--interval|--ip)
         i=$((i + 2))
         ;;
-      --project=*|--interval=*)
+      --project=*|--interval=*|--ip=*)
         i=$((i + 1))
         ;;
       *)

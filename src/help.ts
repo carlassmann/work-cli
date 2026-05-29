@@ -98,7 +98,7 @@ Examples:
 Start all autoStart commands for a workspace.
 
 Usage:
-  work up [workspace] [--create|--no-create]
+  work up [workspace] [--create|--no-create] [--lan] [--no-tls] [--ip addr]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -106,6 +106,9 @@ Arguments:
 Options:
   --create       Create a missing git worktree without asking.
   --no-create    Fail if the workspace worktree does not exist.
+  --lan          Use portless LAN mode and .local URLs.
+  --no-tls       Use http/ws URLs and pass --no-tls to portless.
+  --ip <addr>    Pin LAN IP for portless --ip.
 
 Behavior:
   work up                      Use current worktree.
@@ -124,7 +127,7 @@ Examples:
 Run worktrees.setup for a workspace.
 
 Usage:
-  work setup [workspace]
+  work setup [workspace] [--lan] [--no-tls] [--ip addr]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -135,6 +138,8 @@ Environment:
   WORK_ROOT          Workspace root.
   WORK_SOURCE_ROOT   Root where work.config.js was read.
   WORK_BRANCH        Workspace branch, if known.
+  WORK_ROUTE_TARGET  URL target: local or lan.
+  WORK_ROUTE_PROTOCOL URL protocol: https or http.
   WORK_URL           Web URL when a web route exists.
   WORK_WEB_URL       Same as WORK_URL.
   WORK_<ID>_URL      Full URL for each routed command id.
@@ -236,7 +241,7 @@ Examples:
 Stop and start one configured or ad-hoc command, or autoStart commands with --all.
 
 Usage:
-  work restart [workspace] <command>
+  work restart [workspace] <command> [--lan] [--no-tls] [--ip addr]
   work restart [-p project] [-w workspace] <command>
   work restart [-p project] [-w workspace] --all
 
@@ -248,6 +253,9 @@ Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
   -a, --all                 Inside a project: restart autoStart commands for the workspace.
                             Outside a project: restart matching tracked commands.
+  --lan                     Use portless LAN mode and .local URLs.
+  --no-tls                  Use http/ws URLs and pass --no-tls to portless.
+  --ip <addr>               Pin LAN IP for portless --ip.
 
 Examples:
   work restart web
@@ -262,14 +270,17 @@ Examples:
 Start one configured command.
 
 Usage:
-  work run [workspace] <command>
-  work run [-w workspace] <command>
+  work run [workspace] <command> [--lan] [--no-tls] [--ip addr]
+  work run [-w workspace] <command> [--lan] [--no-tls] [--ip addr]
 
 Arguments:
   command      Configured command id.
 
 Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
+  --lan                     Use portless LAN mode and .local URLs.
+  --no-tls                  Use http/ws URLs and pass --no-tls to portless.
+  --ip <addr>               Pin LAN IP for portless --ip.
 
 Behavior:
   If the command is already alive, work prints "already up".
@@ -356,23 +367,28 @@ Examples:
 List known URLs for routed commands in a workspace.
 
 Usage:
-  work urls [-p project] [workspace]
+  work urls [-p project] [workspace] [--lan] [--no-tls] [--ip addr]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 Options:
   -p, --project <name>      Filter tracked state by project.
+  --lan                     Print configured .local URLs inside a project.
+  --no-tls                  Print http/ws URLs.
+  --ip <addr>               Pin LAN IP for portless --ip when commands start.
 
 URL shape:
   {command}-{workspace}-{project}.localhost
+  {command}-{workspace}-{project}.local with --lan
 
 Empty state:
   no routed commands for <workspace>
 
 Examples:
   work urls
-  work urls feature-x`,
+  work urls feature-x
+  work urls feature-x --lan`,
 
   doctor: `work doctor
 

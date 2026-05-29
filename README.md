@@ -39,6 +39,7 @@ Zero runtime dependencies — just Node ≥ 20 stdlib. The full CLI ships as one
 work create feature-x       # create a worktree without setup or processes
 work up feature-x --create   # create worktree, run setup, start configured servers
 work urls feature-x          # see where everything is reachable
+work up feature-x --lan      # expose routed apps on the local network
 work logs -f web             # tail one service
 work start claude -- claude  # park an interactive command in tmux
 work attach claude           # come back to it later
@@ -93,7 +94,7 @@ export default {
       route: true,
     },
     web: {
-      run: 'PUBLIC_JAZZ_SYNC_SERVER="wss://sync-${WORK_WORKSPACE}-tilly.localhost" astro dev --port "$PORT" --host "$HOST"',
+      run: 'PUBLIC_JAZZ_SYNC_SERVER="$WORK_SYNC_WS_URL" astro dev --port "$PORT" --host "$HOST"',
       autoStart: true,
       route: true,
     },
@@ -109,6 +110,8 @@ export default {
 | `WORK_SOURCE_ROOT` | the **main repo** — useful for copying `.env.local` etc. |
 | `WORK_WORKSPACE`   | slugified branch name                                    |
 | `WORK_PROJECT`     | project slug from config                                 |
+| `WORK_ROUTE_TARGET` | URL target: `local` or `lan`                             |
+| `WORK_ROUTE_PROTOCOL` | URL protocol: `https` or `http`                        |
 | `WORK_URL`         | primary routed URL (the `web` command, if routed)        |
 | `WORK_WEB_URL`     | same as `WORK_URL`                                       |
 | `WORK_SYNC_URL`    | full URL for the `sync` command, if routed               |

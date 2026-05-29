@@ -30,6 +30,9 @@ Core workflow:
 Example:
   export default {
     project: "tilly",
+    routing: {
+      target: "local",
+    },
     worktrees: {
       dir: "../tilly.worktrees",
       setup: "bun scripts/work-setup.ts",
@@ -60,6 +63,11 @@ Command fields:
   routeName           override the first URL segment (default: command id)
   portless            false disables portless wrapping
 
+Routing fields:
+  target              "local" for .localhost, "lan" for .local
+  protocol            "https" by default, or "http" for --no-tls
+  ip                  optional LAN IP passed to portless --ip
+
 Worktree fields:
   dir                 parent directory for created worktrees
   setup               shell command run after worktree creation and by work setup
@@ -70,6 +78,8 @@ Setup hook environment:
   WORK_ROOT           workspace root
   WORK_SOURCE_ROOT    root where work.config.js was read
   WORK_BRANCH         workspace branch, if known
+  WORK_ROUTE_TARGET   URL target: local or lan
+  WORK_ROUTE_PROTOCOL URL protocol: https or http
   WORK_URL            web URL when a web route exists
   WORK_WEB_URL        same as WORK_URL
   WORK_<ID>_URL       full URL for each routed command id
@@ -99,6 +109,8 @@ Environment:
   WORK_ROOT           workspace root
   WORK_SOURCE_ROOT    root where work.config.js was read
   WORK_BRANCH         workspace branch, if known
+  WORK_ROUTE_TARGET   URL target: local or lan
+  WORK_ROUTE_PROTOCOL URL protocol: https or http
   WORK_URL            web URL when a web route exists
   WORK_WEB_URL        same as WORK_URL
   WORK_<ID>_URL       full URL for each routed command id
@@ -243,11 +255,15 @@ Setup behavior:
   work setup feature-x           reruns worktrees.setup for an existing workspace
   work setup                     runs setup for the current workspace`,
 
-  urls: `Canonical URL shape:
+  urls: `Canonical local URL shape:
   {command}-{workspace}-{project}.localhost
+
+Canonical LAN URL shape:
+  {command}-{workspace}-{project}.local
 
 Examples:
   web-feature-x-tilly.localhost
+  web-feature-x-tilly.local
   sync-feature-x-tilly.localhost
   api-fix-auth-my-app.localhost
 
@@ -277,6 +293,7 @@ work owns:
 
 For routed commands, work checks that portless exists, then starts:
   portless {command}-{workspace}-{project} sh -lc "{run}"
+  portless {command}-{workspace}-{project} --lan sh -lc "{run}"
 
 Example:
   portless web-feature-x-tilly sh -lc "bun run dev"
@@ -287,7 +304,11 @@ Install:
 Config:
   route: true              publish via portless under command id
   routeName: "app"         override first URL segment
-  portless: false          do not wrap this command`,
+  portless: false          do not wrap this command
+
+LAN:
+  work up --lan            use .local URLs and pass --lan to portless
+  work up --lan --no-tls   use http/ws URLs`,
 
   commands: `CLI commands:
   work init [project]
@@ -296,10 +317,10 @@ Config:
   work create <workspace>
     create a git worktree without setup or commands
 
-  work up [workspace] [--create|--no-create]
+  work up [workspace] [--create|--no-create] [--lan]
     start autoStart commands for a workspace
 
-  work setup [workspace]
+  work setup [workspace] [--lan]
     run worktrees.setup for a workspace
 
   work down [workspace]
@@ -319,14 +340,14 @@ Config:
   work stop [-p project] [-w workspace] <id>
     stop a tracked configured or ad-hoc command
 
-  work restart [workspace] <command>
+  work restart [workspace] <command> [--lan]
   work restart [-p project] [-w workspace] <command>
     stop and start one configured or ad-hoc command
 
   work restart [-p project] [-w workspace] --all
     stop and start autoStart commands, or tracked commands outside a project
 
-  work run [workspace] <command>
+  work run [workspace] <command> [--lan]
   work run [-w workspace] <command>
     start one configured command, idempotently
 
@@ -343,7 +364,7 @@ Config:
   work logs [-f|--follow] [-p project] [-w workspace] <command>
     print or stream captured stdout/stderr for one command
 
-  work urls [-p project] [workspace]
+  work urls [-p project] [workspace] [--lan]
     print known URLs for routed commands
 
   work doctor
