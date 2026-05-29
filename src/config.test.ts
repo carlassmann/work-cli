@@ -66,6 +66,53 @@ describe("config", () => {
     if (loaded.ok) assert.equal(loaded.value.commands.web?.route, false)
   })
 
+  test("accepts LAN routing config", async () => {
+    const root = await tempDir()
+    await writeConfig(root, `export default {
+      project: "tilly",
+      routing: {
+        target: "lan",
+        protocol: "http",
+        ip: "192.168.1.42",
+      },
+      commands: {
+        web: {
+          run: "bun run dev",
+          route: true,
+        },
+      },
+    }`)
+
+    const loaded = await loadConfig(root)
+    assert.equal(loaded.ok, true)
+    if (loaded.ok) {
+      assert.deepEqual(loaded.value.routing, {
+        target: "lan",
+        protocol: "http",
+        ip: "192.168.1.42",
+      })
+    }
+  })
+
+  test("rejects LAN IP without LAN target", async () => {
+    const root = await tempDir()
+    await writeConfig(root, `export default {
+      project: "tilly",
+      routing: {
+        ip: "192.168.1.42",
+      },
+      commands: {
+        web: {
+          run: "bun run dev",
+        },
+      },
+    }`)
+
+    const loaded = await loadConfig(root)
+    assert.equal(loaded.ok, false)
+    if (!loaded.ok) assert.match(loaded.error.message, /routing\.ip requires/)
+  })
+
   test("missing config returns ConfigError", async () => {
     const root = await tempDir()
     const loaded = await loadConfig(root)

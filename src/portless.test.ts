@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { routeEnvironmentForConfig, spawnCommand, usesPortless, websocketUrl } from "./portless.js"
+import { portlessUrl, routeEnvironmentForConfig, spawnCommand, usesPortless, websocketUrl } from "./portless.js"
 import type { DevConfig } from "./types.js"
 
 const config: DevConfig = {
@@ -30,6 +30,23 @@ describe("portless", () => {
       args: ["web-feature-x-tilly", "sh", "-lc", "bun run dev"],
       shell: false,
       display: 'portless web-feature-x-tilly sh -lc "bun run dev"',
+    })
+  })
+
+  test("passes LAN routing flags to portless", () => {
+    assert.deepEqual(spawnCommand({
+      project: "tilly",
+      routing: {
+        target: "lan",
+        protocol: "http",
+        ip: "192.168.1.42",
+      },
+      commands: {},
+    }, "feature-x", "web", { run: "bun run dev", route: true }), {
+      executable: "portless",
+      args: ["web-feature-x-tilly", "--lan", "--no-tls", "--ip", "192.168.1.42", "sh", "-lc", "bun run dev"],
+      shell: false,
+      display: 'portless web-feature-x-tilly --lan --no-tls --ip 192.168.1.42 sh -lc "bun run dev"',
     })
   })
 
@@ -65,6 +82,36 @@ describe("portless", () => {
       web: "wss://web-feature-x-tilly.localhost",
       sync: "wss://sync-feature-x-tilly.localhost",
     })
+  })
+
+  test("exports LAN URLs for LAN routing", () => {
+    const config: DevConfig = {
+      project: "tilly",
+      routing: { target: "lan" },
+      commands: {
+        web: { run: "bun run dev", route: true },
+        sync: { run: "bun run sync", route: true },
+      },
+    }
+    const env = routeEnvironmentForConfig(config, "feature-x")
+
+    assert.equal(portlessUrl(config, "feature-x", "web", config.commands.web!), "https://web-feature-x-tilly.local")
+    assert.equal(env.WORK_ROUTE_TARGET, "lan")
+    assert.equal(env.WORK_WEB_URL, "https://web-feature-x-tilly.local")
+    assert.equal(env.WORK_SYNC_WS_URL, "wss://sync-feature-x-tilly.local")
+  })
+
+  test("exports HTTP LAN URLs when TLS is disabled", () => {
+    const env = routeEnvironmentForConfig({
+      project: "tilly",
+      routing: { target: "lan", protocol: "http" },
+      commands: {
+        web: { run: "bun run dev", route: true },
+      },
+    }, "feature-x")
+
+    assert.equal(env.WORK_WEB_URL, "http://web-feature-x-tilly.local")
+    assert.equal(env.WORK_WEB_WS_URL, "ws://web-feature-x-tilly.local")
   })
 
   test("converts http URLs to websocket URLs", () => {

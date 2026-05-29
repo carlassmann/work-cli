@@ -5,7 +5,6 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
-import { routeName, routeUrl } from "./names.js"
 import { portlessUrl, routeEnvironment, routeEnvironmentForConfig, spawnCommand } from "./portless.js"
 import { commandExists, isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
@@ -210,36 +209,30 @@ function trackedProcessCommand(state: WorkspaceState, command: ProcessCommandRec
     }
   }
 
-  const route = routeName(state.project, state.workspace, command.id, routePrefix(state, command, routed.route))
   const run = routed.run
 
   return {
     executable: "portless",
-    args: [route, "sh", "-lc", run],
+    args: [routed.route, ...routed.args, "sh", "-lc", run],
     shell: false,
-    display: `portless ${route} sh -lc ${JSON.stringify(run)}`,
-    url: routeUrl(state.project, state.workspace, command.id, routePrefix(state, command, routed.route)),
+    display: `portless ${[routed.route, ...routed.args].join(" ")} sh -lc ${JSON.stringify(run)}`,
+    url: command.url,
   }
 }
 
-function parsePortlessCommand(command: string): { route: string; run: string } | null {
-  const match = command.match(/^portless\s+(\S+)\s+sh\s+-lc\s+(.+)$/)
+function parsePortlessCommand(command: string): { route: string; args: Array<string>; run: string } | null {
+  const match = command.match(/^portless\s+(\S+)(.*?)\s+sh\s+-lc\s+(.+)$/)
   if (!match) return null
 
   try {
-    return { route: match[1], run: JSON.parse(match[2]) as string }
+    return {
+      route: match[1],
+      args: match[2]?.trim() ? match[2].trim().split(/\s+/) : [],
+      run: JSON.parse(match[3]) as string,
+    }
   } catch {
     return null
   }
-}
-
-function routePrefix(state: WorkspaceState, command: ProcessCommandRecord, route: string) {
-  if (route.includes(".")) return route.split(".")[0]
-
-  const suffix = `-${state.workspace}-${state.project}`
-  if (route.endsWith(suffix)) return route.slice(0, -suffix.length)
-
-  return command.id
 }
 
 export async function pruneDeadCommands(): Promise<Result<number>> {

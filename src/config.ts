@@ -73,6 +73,9 @@ function validateConfig(config: DevConfig): Result<void> {
   const worktrees = validateWorktrees(config)
   if (!worktrees.ok) return worktrees
 
+  const routing = validateRouting(config)
+  if (!routing.ok) return routing
+
   if (!config.commands || typeof config.commands !== "object" || Array.isArray(config.commands)) {
     return errResult("ConfigError", "commands must be an object")
   }
@@ -100,6 +103,34 @@ function validateWorktrees(config: DevConfig): Result<void> {
 
   if (config.worktrees.setup && typeof config.worktrees.setup !== "string") {
     return errResult("ConfigError", "worktrees.setup must be a string")
+  }
+
+  return ok(undefined)
+}
+
+function validateRouting(config: DevConfig): Result<void> {
+  if (!config.routing) {
+    return ok(undefined)
+  }
+
+  if (typeof config.routing !== "object" || Array.isArray(config.routing)) {
+    return errResult("ConfigError", "routing must be an object")
+  }
+
+  if (config.routing.target !== undefined && config.routing.target !== "local" && config.routing.target !== "lan") {
+    return errResult("ConfigError", `routing.target must be "local" or "lan"`)
+  }
+
+  if (config.routing.protocol !== undefined && config.routing.protocol !== "https" && config.routing.protocol !== "http") {
+    return errResult("ConfigError", `routing.protocol must be "https" or "http"`)
+  }
+
+  if (config.routing.ip !== undefined && typeof config.routing.ip !== "string") {
+    return errResult("ConfigError", "routing.ip must be a string")
+  }
+
+  if (config.routing.ip && config.routing.target !== "lan") {
+    return errResult("ConfigError", `routing.ip requires routing.target: "lan"`)
   }
 
   return ok(undefined)
@@ -166,4 +197,3 @@ function validateCommand(id: string, command: DevConfig["commands"][string]): Re
 
   return ok(undefined)
 }
-

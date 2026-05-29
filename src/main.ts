@@ -13,12 +13,12 @@ import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state
 import { docsText } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
-import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
+import { ensurePortless, portlessUrl, routeEnvironmentForConfig, usesPortless, withRouting } from "./portless.js"
 import { commandExists, existsAt } from "./shell.js"
 import { daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import type { Result } from "./result.js"
-import type { DevConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { DevConfig, RoutingConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const VERSION = "0.1.0"
 
@@ -35,6 +35,33 @@ type ProjectContext = {
 type StateFilters = {
   project?: string | undefined
   workspace?: string | undefined
+}
+
+function routingFlags() {
+  return {
+    lan: booleanFlag(),
+    "no-tls": booleanFlag(),
+    ip: valueFlag(),
+  }
+}
+
+function routingFromFlags(flags: { lan?: boolean; "no-tls"?: boolean; ip?: string | undefined }): RoutingConfig {
+  const routing: RoutingConfig = {}
+
+  if (flags.lan) {
+    routing.target = "lan"
+  }
+
+  if (flags["no-tls"]) {
+    routing.protocol = "http"
+  }
+
+  if (flags.ip) {
+    routing.target = "lan"
+    routing.ip = flags.ip
+  }
+
+  return routing
 }
 
 const result = await main(process.argv.slice(2))
@@ -194,7 +221,7 @@ async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { create: booleanFlag(), "no-create": booleanFlag() },
+    flags: { create: booleanFlag(), "no-create": booleanFlag(), ...routingFlags() },
   })
   if (!parsed.ok) return parsed
 
@@ -209,19 +236,20 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
+  const config = withRouting(ctx.value.config, routingFromFlags(parsed.value.flags))
 
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create, noCreate })
   if (!workspace.ok) return workspace
 
-  const commands = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
+  const commands = Object.entries(config.commands).filter(([, command]) => command.autoStart)
 
   if (workspace.value.created) {
-    const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value)
+    const setup = await runWorkspaceSetup(config, ctx.value.root, workspace.value)
     if (!setup.ok) return setup
   }
 
   if (commands.length === 0) {
-    console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
+    console.log(`no autoStart commands in work.config.js for ${config.project}`)
     return ok(undefined)
   }
 
@@ -232,7 +260,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!daemon.ok) return daemon
 
   for (const [id] of commands) {
-    const response = await sendDaemon({ type: "run", config: ctx.value.config, workspace: workspace.value, command: id })
+    const response = await sendDaemon({ type: "run", config, workspace: workspace.value, command: id })
     if (!response.ok) return response
     printProcessStart(id, response.value.data)
   }
@@ -241,7 +269,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, { flags: routingFlags() })
   if (!parsed.ok) return parsed
 
   const workspaceName = parsed.value.positional[0]
@@ -249,11 +277,12 @@ async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (extra) return extra
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
+  const config = withRouting(ctx.value.config, routingFromFlags(parsed.value.flags))
 
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  return runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value)
+  return runWorkspaceSetup(config, ctx.value.root, workspace.value)
 }
 
 async function runDown(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -316,7 +345,7 @@ async function downStates(states: Array<Pick<WorkspaceState, "project" | "worksp
 }
 
 async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w") } })
+  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), ...routingFlags() } })
   if (!parsed.ok) return parsed
 
   const parsedTarget = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
@@ -328,10 +357,11 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
+  const config = withRouting(ctx.value.config, routingFromFlags(parsed.value.flags))
 
-  const commandConfig = ctx.value.config.commands[command]
+  const commandConfig = config.commands[command]
   if (!commandConfig) {
-    return errResult("CLIError", withSuggestion(`unknown command: ${command}`, command, Object.keys(ctx.value.config.commands)))
+    return errResult("CLIError", withSuggestion(`unknown command: ${command}`, command, Object.keys(config.commands)))
   }
 
   const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true })
@@ -343,7 +373,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const daemon = await ensureDaemon()
   if (!daemon.ok) return daemon
 
-  const response = await sendDaemon({ type: "run", config: ctx.value.config, workspace: workspace.value, command })
+  const response = await sendDaemon({ type: "run", config, workspace: workspace.value, command })
   if (!response.ok) return response
 
   printProcessStart(command, response.value.data)
@@ -352,7 +382,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w") },
+    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w"), ...routingFlags() },
   })
   if (!parsed.ok) return parsed
 
@@ -369,6 +399,11 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const ctx = await loadProjectContext()
   if (!ctx.ok || projectArg) {
+    const routing = routingFromFlags(parsed.value.flags)
+    if (Object.keys(routing).length > 0) {
+      return errResult("CLIError", "routing flags require a work project")
+    }
+
     if (all) {
       const states = await findWorkspaceStates({ project: projectArg, workspace: workspaceArg })
       if (!states.ok) return states
@@ -383,22 +418,27 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
     if (!resolved.ok) return resolved
     return restartTracked(resolved.value)
   }
+  const config = withRouting(ctx.value.config, routingFromFlags(parsed.value.flags))
 
   const workspace = await resolveWorkspace(ctx.value, workspaceArg, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
   if (all) {
-    return restartAll(ctx.value, workspace.value)
+    return restartAll({ ...ctx.value, config }, workspace.value)
   }
 
   if (!target) {
     return errResult("CLIError", "missing command. Usage: work restart [workspace] <command> | work restart -w workspace <command> | work restart --all")
   }
 
-  const commandConfig = ctx.value.config.commands[target]
+  const commandConfig = config.commands[target]
 
   if (commandConfig) {
-    return restartConfigured(ctx.value, workspace.value, target, commandConfig)
+    return restartConfigured({ ...ctx.value, config }, workspace.value, target, commandConfig)
+  }
+
+  if (Object.keys(routingFromFlags(parsed.value.flags)).length > 0) {
+    return errResult("CLIError", "routing flags only apply to configured commands")
   }
 
   return restartAdhoc(ctx.value, workspace.value, target)
@@ -662,14 +702,19 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { project: valueFlag("p") } })
+  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), ...routingFlags() } })
   if (!parsed.ok) return parsed
 
   const workspaceArg = parsed.value.positional[0]
   const extra = unexpectedPositional(parsed.value.positional, 1)
   if (extra) return extra
+  const routing = routingFromFlags(parsed.value.flags)
   const ctx = await loadProjectContext()
   if (!ctx.ok || parsed.value.flags.project) {
+    if (Object.keys(routing).length > 0) {
+      return errResult("CLIError", "routing flags require a work project")
+    }
+
     const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
     if (!states.ok) return states
 
@@ -688,16 +733,21 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
     return ok(undefined)
   }
 
+  const config = withRouting(ctx.value.config, routing)
   const workspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
   const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
   if (!stateResult.ok) return stateResult
-  const rows: Array<Array<string>> = []
+  const rows: Array<Array<string>> = Object.keys(routing).length > 0 ? configuredUrlRows(config, workspace) : []
 
-  for (const command of Object.values(stateResult.value?.commands ?? {})) {
-    if (command.url) {
-      rows.push([workspace, command.id, command.url])
+  if (rows.length === 0) {
+    for (const command of Object.values(stateResult.value?.commands ?? {})) {
+      if (command.url) {
+        rows.push([workspace, command.id, command.url])
+      }
     }
   }
+
+  if (rows.length === 0) rows.push(...configuredUrlRows(config, workspace))
 
   if (rows.length === 0) {
     console.log(`no routed commands for ${workspace}`)
@@ -706,6 +756,13 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   return ok(undefined)
+}
+
+function configuredUrlRows(config: DevConfig, workspace: string) {
+  return Object.entries(config.commands).flatMap(([id, command]) => {
+    const url = portlessUrl(config, workspace, id, command)
+    return url ? [[workspace, id, url]] : []
+  })
 }
 
 async function runStart(args: ReadonlyArray<string>, commandName = "start"): Promise<Result<void>> {

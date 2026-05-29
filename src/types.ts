@@ -1,4 +1,12 @@
 type RestartPolicy = "manual" | "on-exit"
+type RouteTarget = "local" | "lan"
+type RouteProtocol = "https" | "http"
+
+export type RoutingConfig = {
+  target?: RouteTarget
+  protocol?: RouteProtocol
+  ip?: string
+}
 
 export type CommandConfig = {
   run: string
@@ -15,6 +23,7 @@ export type CommandConfig = {
 
 export type DevConfig = {
   project: string
+  routing?: RoutingConfig
   worktrees?: {
     dir?: string
     setup?: string

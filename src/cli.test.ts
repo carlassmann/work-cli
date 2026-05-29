@@ -481,6 +481,27 @@ describe("cli", () => {
     assert.ok(stop.stdout.includes("stopped tilly/feature-x/web"))
   })
 
+  test("urls --lan prints configured LAN URLs", async () => {
+    const root = await tempDir()
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {
+        web: { run: "echo web", route: true },
+        sync: { run: "echo sync", route: true },
+      },
+    }`)
+
+    const result = await runCli(["urls", "feature-x", "--lan"], { cwd: root })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stderr, "")
+    assert.ok(result.stdout.includes("https://web-feature-x-tilly.local"))
+    assert.ok(result.stdout.includes("https://sync-feature-x-tilly.local"))
+    assert.ok(!result.stdout.includes(".localhost"))
+  })
+
   test("restart --all works outside a configured project", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
@@ -695,7 +716,7 @@ describe("cli", () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
     const setupFile = path.join(root, "setup-env.json")
-    const setupCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, JSON.stringify({ project: process.env.WORK_PROJECT, workspace: process.env.WORK_WORKSPACE, root: process.env.WORK_ROOT, web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS, wsUrls: process.env.WORK_WS_URLS }))'`
+    const setupCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, JSON.stringify({ project: process.env.WORK_PROJECT, workspace: process.env.WORK_WORKSPACE, root: process.env.WORK_ROOT, target: process.env.WORK_ROUTE_TARGET, web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS, wsUrls: process.env.WORK_WS_URLS }))'`
 
     await initGitRepo(root)
     await writeFile(path.join(root, "work.config.js"), `export default {
@@ -710,7 +731,7 @@ describe("cli", () => {
         },
       }`)
 
-    const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot })
+    const result = await runCli(["up", "feature-x", "--create", "--lan"], { cwd: root, stateRoot })
 
     assert.equal(result.stderr, "")
     assert.equal(result.exitCode, 0)
@@ -719,19 +740,20 @@ describe("cli", () => {
       project: "tilly",
       workspace: "feature-x",
       root: await fs.realpath(path.join(root, "worktrees", "feature-x")),
-      web: "https://web-feature-x-tilly.localhost",
-      sync: "https://sync-feature-x-tilly.localhost",
-      syncWs: "wss://sync-feature-x-tilly.localhost",
+      target: "lan",
+      web: "https://web-feature-x-tilly.local",
+      sync: "https://sync-feature-x-tilly.local",
+      syncWs: "wss://sync-feature-x-tilly.local",
     })
 
     const env = JSON.parse(await fs.readFile(setupFile, "utf8"))
     assert.deepEqual(JSON.parse(env.urls), {
-      web: "https://web-feature-x-tilly.localhost",
-      sync: "https://sync-feature-x-tilly.localhost",
+      web: "https://web-feature-x-tilly.local",
+      sync: "https://sync-feature-x-tilly.local",
     })
     assert.deepEqual(JSON.parse(env.wsUrls), {
-      web: "wss://web-feature-x-tilly.localhost",
-      sync: "wss://sync-feature-x-tilly.localhost",
+      web: "wss://web-feature-x-tilly.local",
+      sync: "wss://sync-feature-x-tilly.local",
     })
   })
 })

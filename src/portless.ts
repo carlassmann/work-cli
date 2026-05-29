@@ -1,8 +1,8 @@
 import { commandExists } from "./shell.js"
-import { routeName, routeUrl } from "./names.js"
+import { routeName } from "./names.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
-import type { CommandConfig, DevConfig } from "./types.js"
+import type { CommandConfig, DevConfig, RoutingConfig } from "./types.js"
 
 export function usesPortless(command: CommandConfig) {
   return command.portless !== false && command.route === true
@@ -13,7 +13,9 @@ export function portlessUrl(config: DevConfig, workspace: string, id: string, co
     return null
   }
 
-  return routeUrl(config.project, workspace, id, command.routeName)
+  const route = routeName(config.project, workspace, id, command.routeName)
+  const routing = resolveRouting(config)
+  return `${routing.protocol}://${route}.${routeTld(routing.target)}`
 }
 
 function routeUrls(config: DevConfig, workspace: string) {
@@ -24,11 +26,14 @@ function routeUrls(config: DevConfig, workspace: string) {
   )
 }
 
-export function routeEnvironment(urls: Record<string, string>) {
+export function routeEnvironment(urls: Record<string, string>, routing: RoutingConfig = {}) {
   const websocketUrls = Object.fromEntries(
     Object.entries(urls).map(([id, url]) => [id, websocketUrl(url)]),
   )
+  const resolved = resolveRouting({ project: "", routing: inferRouting(urls, routing), commands: {} })
   const env: Record<string, string> = {
+    WORK_ROUTE_TARGET: resolved.target,
+    WORK_ROUTE_PROTOCOL: resolved.protocol,
     WORK_URL: urls.web ?? "",
     WORK_WEB_URL: urls.web ?? "",
     WORK_WEB_WS_URL: websocketUrls.web ?? "",
@@ -45,8 +50,26 @@ export function routeEnvironment(urls: Record<string, string>) {
   return env
 }
 
+function inferRouting(urls: Record<string, string>, routing: RoutingConfig): RoutingConfig {
+  const firstUrl = Object.values(urls)[0]
+  if (!firstUrl) return routing
+
+  const url = new URL(firstUrl)
+
+  const inferred: RoutingConfig = {
+    target: routing.target ?? (url.hostname.endsWith(".local") ? "lan" : "local"),
+    protocol: routing.protocol ?? (url.protocol === "http:" ? "http" : "https"),
+  }
+
+  if (routing.ip) {
+    inferred.ip = routing.ip
+  }
+
+  return inferred
+}
+
 export function routeEnvironmentForConfig(config: DevConfig, workspace: string) {
-  return routeEnvironment(routeUrls(config, workspace))
+  return routeEnvironment(routeUrls(config, workspace), config.routing)
 }
 
 export function websocketUrl(url: string) {
@@ -57,6 +80,16 @@ export function websocketUrl(url: string) {
 
 function envName(id: string) {
   return id.replace(/-/g, "_").toUpperCase()
+}
+
+export function withRouting(config: DevConfig, routing: RoutingConfig) {
+  return {
+    ...config,
+    routing: {
+      ...config.routing,
+      ...routing,
+    },
+  }
 }
 
 export function spawnCommand(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
@@ -70,13 +103,46 @@ export function spawnCommand(config: DevConfig, workspace: string, id: string, c
   }
 
   const route = routeName(config.project, workspace, id, command.routeName)
+  const routing = resolveRouting(config)
+  const routingArgs = portlessRoutingArgs(routing)
 
   return {
     executable: "portless",
-    args: [route, "sh", "-lc", command.run],
+    args: [route, ...routingArgs, "sh", "-lc", command.run],
     shell: false,
-    display: `portless ${route} sh -lc ${JSON.stringify(command.run)}`,
+    display: `portless ${[route, ...routingArgs].join(" ")} sh -lc ${JSON.stringify(command.run)}`,
   }
+}
+
+function resolveRouting(config: DevConfig): Required<RoutingConfig> {
+  return {
+    target: config.routing?.target ?? "local",
+    protocol: config.routing?.protocol ?? "https",
+    ip: config.routing?.ip ?? "",
+  }
+}
+
+function routeTld(target: RoutingConfig["target"]) {
+  if (target === "lan") return "local"
+  return "localhost"
+}
+
+function portlessRoutingArgs(routing: Required<RoutingConfig>) {
+  const args: Array<string> = []
+
+  if (routing.target === "lan") {
+    args.push("--lan")
+  }
+
+  if (routing.protocol === "http") {
+    args.push("--no-tls")
+  }
+
+  if (routing.ip) {
+    args.push("--ip", routing.ip)
+  }
+
+  return args
 }
 
 export async function ensurePortless(commands: Record<string, CommandConfig>): Promise<Result<void>> {
