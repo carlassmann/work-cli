@@ -1046,10 +1046,15 @@ async function loadProjectContext(): Promise<Result<ProjectContext>> {
   const root = await gitMainWorktree(process.cwd())
   if (!root.ok) return root
 
-  const config = await loadConfig(root.value)
-  if (!config.ok) return config
+  const config = await loadConfig(cwdRoot.value)
+  if (config.ok) {
+    return ok({ root: root.value, cwdRoot: cwdRoot.value, config: config.value })
+  }
 
-  return ok({ root: root.value, cwdRoot: cwdRoot.value, config: config.value })
+  const mainConfig = await loadConfig(root.value)
+  if (!mainConfig.ok) return mainConfig
+
+  return ok({ root: root.value, cwdRoot: cwdRoot.value, config: mainConfig.value })
 }
 
 async function defaultWorkspace(root: string): Promise<string> {

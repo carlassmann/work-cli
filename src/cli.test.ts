@@ -2,9 +2,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import { initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
 
 const fakeTmuxBin = path.resolve(import.meta.dirname, "test-fixtures/tmux-fake.sh")
+const execFileAsync = promisify(execFile)
 
 describe("cli", () => {
   test("prints curated help without requiring a git repo", async () => {
@@ -335,6 +338,70 @@ describe("cli", () => {
     assert.ok(result.stdout.includes("web"))
     assert.ok(!result.stdout.includes("tilly/other"))
     assert.ok(!result.stdout.includes("api"))
+  })
+
+  test("state commands default to the current linked worktree config", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const worktree = path.join(root, "worktrees", "feature-x")
+    const mainLog = path.join(root, "main.log")
+    const featureLog = path.join(worktree, "feature.log")
+
+    await initGitRepo(root)
+    await execFileAsync("git", ["worktree", "add", "-b", "feature-x", worktree], { cwd: root })
+    await writeFile(path.join(worktree, "work.config.js"), `export default {
+      project: "tilly",
+      worktrees: { dir: "worktrees" },
+      commands: {
+        web: { run: "echo web" },
+      },
+    }`)
+    await writeFile(mainLog, "main\n")
+    await writeFile(featureLog, "feature\n")
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "main",
+      branch: "main",
+      root,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command: "web",
+          cwd: root,
+          log: mainLog,
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: process.pid,
+        },
+      },
+    }))
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "feature-x",
+      branch: "feature-x",
+      root: worktree,
+      commands: {
+        web: {
+          id: "web",
+          label: "web",
+          command: "web",
+          cwd: worktree,
+          log: featureLog,
+          url: null,
+          startedAt: new Date().toISOString(),
+          runner: "process",
+          pid: process.pid,
+        },
+      },
+    }))
+
+    const result = await runCli(["logs", "web"], { cwd: worktree, stateRoot })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stderr, "")
+    assert.equal(result.stdout, "feature\n")
   })
 
   test("state commands work outside a configured project", async () => {
