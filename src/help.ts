@@ -19,11 +19,7 @@ Commands:
   watch      Live-refresh the ps table.
   logs       Print or follow command logs.
   urls       List workspace URLs.
-  start      Start an ad-hoc tmux command.
-  exec       Alias for start.
-  tmux       Alias for start.
-  attach     Attach to an ad-hoc tmux command.
-  stop       Stop a tracked configured or ad-hoc command.
+  stop       Stop a tracked command.
   doctor     Check project setup.
   prune      Remove dead process records.
   daemon     Manage workd.
@@ -34,7 +30,7 @@ Commands:
   cd         Print workspace root for shell cd.
 
 The workspace is implied from the current git branch. Pass it explicitly
-as a positional to up/setup/down/urls/cd/run/restart/logs/stop/attach/start,
+as a positional to up/setup/down/urls/cd/run/restart/logs/stop,
 or via -w where supported.
 State-only commands also work outside a project; ps/status/watch show all tracked state there.
 
@@ -48,10 +44,8 @@ Examples:
   work run feature-x web
   work restart web
   work restart -w feature-x --all
-  work exec claude -- claude
-  work attach claude
-  work logs -f claude
-  work stop claude
+  work logs -f web
+  work stop web
   work urls feature-x
   work doctor
   work daemon status
@@ -81,43 +75,52 @@ Examples:
 Create a git worktree without running setup or starting commands.
 
 Usage:
-  work create <workspace>
+  work create <workspace> [--remote <name>]
 
 Arguments:
-  workspace    Workspace slug.
+  workspace    Branch name. The workspace slug is derived from it.
+
+Options:
+  --remote <name>    Fetch the branch from this remote and track it.
 
 Behavior:
-  work create feature-x   Create ../<project>.worktrees/feature-x from HEAD.
-  work create feature-x   Print existing path when already created.
+  work create feature-x   Use the local branch when it exists.
+  work create feature-x   Track the remote branch when exactly one remote has it.
+  work create feature-x   Otherwise create a new branch from HEAD.
+  work create feature-x --remote origin   Fetch origin/feature-x, then track it.
 
 Examples:
-  work create feature-x`,
+  work create feature-x
+  work create feature-x --remote origin`,
 
   up: `work up
 
 Start all autoStart commands for a workspace.
 
 Usage:
-  work up [workspace] [--create|--no-create]
+  work up [workspace] [--create|--no-create] [--remote <name>]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 Options:
-  --create       Create a missing git worktree without asking.
-  --no-create    Fail if the workspace worktree does not exist.
+  --create           Create a missing git worktree without asking.
+  --no-create        Fail if the workspace worktree does not exist.
+  --remote <name>    Fetch the branch from this remote and track it when creating.
 
 Behavior:
   work up                      Use current worktree.
   work up feature-x            Use ../<project>.worktrees/feature-x.
   work up feature-x            Ask before creating when missing.
   work up feature-x --create   Create without asking when missing.
+  work up feature-x --create   Use local branch, else track a unique remote branch, else branch from HEAD.
   work up feature-x --create   Run worktrees.setup after create.
 
 Examples:
   work up
   work up feature-x
-  work up feature-x --create`,
+  work up feature-x --create
+  work up feature-x --create --remote origin`,
 
   setup: `work setup
 
@@ -167,56 +170,9 @@ Examples:
   work down feature-x
   work down --all`,
 
-  start: `work start
-
-Start an ad-hoc command in a detached tmux session.
-
-Usage:
-  work start [-a] [-w workspace] <id> -- <command>
-  work start [-a] [workspace] <id> -- <command>
-  work exec [-a] [-w workspace] <id> -- <command>
-  work exec [-a] [workspace] <id> -- <command>
-  work tmux [-a] [-w workspace] <id> -- <command>
-  work tmux [-a] [workspace] <id> -- <command>
-
-Arguments:
-  id           DNS-safe command id.
-  command      Command to run.
-
-Options:
-  -a, --attach              Attach after starting.
-  -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
-
-Examples:
-  work start claude -- claude
-  work exec claude -- claude
-  work tmux shell -- zsh
-  work start --attach claude -- claude
-  work start claude -- claude --dangerously-skip-permissions
-  work start shell -- zsh
-  work start feature-x claude -- claude
-  work start -w feature-x claude -- claude`,
-
-  attach: `work attach
-
-Attach to an ad-hoc tmux command.
-
-Usage:
-  work attach [-p project] [-w workspace] <id>
-  work attach [workspace] <id>
-
-Options:
-  -p, --project <name>      Target project when outside a project.
-  -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
-
-Examples:
-  work attach claude
-  work attach feature-x claude
-  work attach -w feature-x claude`,
-
   stop: `work stop
 
-Stop a tracked configured or ad-hoc command.
+Stop a tracked command.
 
 Usage:
   work stop [-p project] [-w workspace] <id>
@@ -227,13 +183,13 @@ Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
-  work stop claude
-  work stop feature-x claude
-  work stop -w feature-x claude`,
+  work stop web
+  work stop feature-x web
+  work stop -w feature-x web`,
 
   restart: `work restart
 
-Stop and start one configured or ad-hoc command, or autoStart commands with --all.
+Stop and start one configured command, or autoStart commands with --all.
 
 Usage:
   work restart [workspace] <command>
@@ -241,7 +197,7 @@ Usage:
   work restart [-p project] [-w workspace] --all
 
 Arguments:
-  command      Configured or ad-hoc command id.
+  command      Configured command id.
 
 Options:
   -p, --project <name>      Target project when outside a project.
@@ -251,7 +207,6 @@ Options:
 
 Examples:
   work restart web
-  work restart claude
   work restart feature-x web
   work restart -w feature-x web
   work restart --all
@@ -289,11 +244,10 @@ Usage:
   work ps -a
 
 Output:
-  status    project/workspace    command    runner    handle    url
+  status    project/workspace    command    pid    url
 
 Status:
-  process commands show up/dead
-  tmux commands show busy/idle/dead
+  commands show up/dead
 
 Empty state:
   no tracked commands`,
@@ -386,7 +340,6 @@ Checks:
   work.config.js
   worktrees.setup
   whether portless is installed when routed commands need it
-  whether tmux is installed for ad-hoc commands
   command start mode and route mode`,
 
   prune: `work prune
@@ -396,7 +349,7 @@ Remove dead command records from work state.
 Usage:
   work prune
 
-Use this after crashes, manual kills, closed tmux sessions, or machine restarts.`,
+Use this after crashes, manual kills, or machine restarts.`,
 
   daemon: `work daemon
 
@@ -441,7 +394,7 @@ Install (bash):
   #   source <(work completions bash)
 
 Completes:
-  subcommands, workspaces, configured and ad-hoc command ids,
+  subcommands, workspaces, configured command ids,
   docs topics, daemon actions.
 
 Prefer work shell-init for completion plus the cd wrapper.`,
@@ -518,7 +471,6 @@ Topics:
   portless
   commands
   daemon
-  tmux
 
 Examples:
   work docs
@@ -544,7 +496,6 @@ export function commandHelp(name: string) {
 }
 
 export function helpSection(name: string): HelpSection | null {
-  if (name === "exec" || name === "tmux") return "start"
   if (name in sections) return name as HelpSection
   return null
 }

@@ -2,9 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
-
-const fakeTmuxBin = path.resolve(import.meta.dirname, "test-fixtures/tmux-fake.sh")
+import { git, initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
 
 describe("cli", () => {
   test("prints curated help without requiring a git repo", async () => {
@@ -129,6 +127,64 @@ describe("cli", () => {
     await assert.rejects(fs.stat(path.join(stateRoot, "projects", "tilly", "workspaces", "feature-x", "state.json")))
   })
 
+  test("create checks out an already-fetched remote branch with tracking", async () => {
+    const { root } = await cloneWithRemoteBranch("feature-y")
+
+    const result = await runCli(["create", "feature-y"], { cwd: root })
+
+    assert.equal(result.stderr, "")
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("created feature-y from origin/feature-y"))
+
+    const worktree = path.join(root, "worktrees", "feature-y")
+    assert.ok(await fs.stat(path.join(worktree, "marker.txt")))
+    assert.equal((await git(["branch", "--show-current"], worktree)).stdout.trim(), "feature-y")
+    assert.equal(
+      (await git(["rev-parse", "--abbrev-ref", "feature-y@{upstream}"], worktree)).stdout.trim(),
+      "origin/feature-y",
+    )
+  })
+
+  test("create --remote fetches a branch unknown locally", async () => {
+    const { origin, root } = await cloneWithRemoteBranch("feature-y")
+    await addRemoteBranch(origin, "feature-z")
+
+    const result = await runCli(["create", "feature-z", "--remote", "origin"], { cwd: root })
+
+    assert.equal(result.stderr, "")
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("created feature-z from origin/feature-z"))
+
+    const worktree = path.join(root, "worktrees", "feature-z")
+    assert.ok(await fs.stat(path.join(worktree, "marker.txt")))
+    assert.equal(
+      (await git(["rev-parse", "--abbrev-ref", "feature-z@{upstream}"], worktree)).stdout.trim(),
+      "origin/feature-z",
+    )
+  })
+
+  test("create --remote fails cleanly when the branch is missing on the remote", async () => {
+    const { root } = await cloneWithRemoteBranch("feature-y")
+
+    const result = await runCli(["create", "nope", "--remote", "origin"], { cwd: root })
+
+    assert.equal(result.exitCode, 1)
+    assert.ok(result.stderr.includes("failed to fetch nope from origin"))
+  })
+
+  test("create keeps the real branch name for remote slash branches", async () => {
+    const { root } = await cloneWithRemoteBranch("feat/foo")
+
+    const result = await runCli(["create", "feat/foo"], { cwd: root })
+
+    assert.equal(result.stderr, "")
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("created feat-foo from origin/feat/foo"))
+
+    const worktree = path.join(root, "worktrees", "feat-foo")
+    assert.equal((await git(["branch", "--show-current"], worktree)).stdout.trim(), "feat/foo")
+  })
+
   test("ps -a aligns columns for long workspace names", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
@@ -183,7 +239,6 @@ describe("cli", () => {
     assert.equal(lines.length, 3)
     assert.ok(lines[0].includes("status"))
     assert.equal(lines[1].indexOf("sync"), lines[2].indexOf("livekit"))
-    assert.equal(lines[1].indexOf("process"), lines[2].indexOf("process"))
     assert.equal(lines[1].indexOf(String(pid)), lines[2].indexOf(String(pid)))
   })
 
@@ -227,15 +282,6 @@ describe("cli", () => {
 
     assert.equal(result.exitCode, 1)
     assert.ok(result.stderr.includes("Did you mean web?"))
-  })
-
-  test("aliases show start help", async () => {
-    const root = await tempDir()
-    const result = await runCli(["exec", "--help"], { cwd: root })
-
-    assert.equal(result.exitCode, 0)
-    assert.ok(result.stdout.includes("work start"))
-    assert.ok(result.stdout.includes("work exec"))
   })
 
   test("value flags accept --flag=value", async () => {
@@ -521,97 +567,14 @@ describe("cli", () => {
     assert.match(restart.stderr, /ENOENT/)
   })
 
-  test("start --attach starts an ad-hoc tmux command and attaches", async () => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    const tmuxState = await tempDir("tmux-fake-")
-
-    await initGitRepo(root)
-    await writeFile(path.join(root, "work.config.js"), `export default {
-      project: "tilly",
-      commands: {},
-    }`)
-
-    const result = await runCli(["start", "--attach", "agent", "--", "sleep", "30"], {
-      cwd: root,
-      stateRoot,
-      env: {
-        WORK_TMUX_BIN: fakeTmuxBin,
-        WORK_TMUX_STATE_DIR: tmuxState,
-      },
-    })
-
-    assert.equal(result.exitCode, 0)
-    assert.equal(result.stderr, "")
-    assert.ok(result.stdout.includes("started agent tmux=work-tilly-main"))
-
-    const calls = await fs.readFile(path.join(tmuxState, "calls.log"), "utf8")
-    assert.ok(calls.includes("new-session -d -s work-tilly-main"))
-    assert.ok(calls.includes("select-window -t work-tilly-main:agent"))
-    assert.ok(calls.includes("attach-session -t work-tilly-main"))
-
-    await runCli(["stop", "agent"], { cwd: root, stateRoot })
-  })
-
-  test("exec aliases start for ad-hoc tmux commands", async () => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    const tmuxState = await tempDir("tmux-fake-")
-
-    await initGitRepo(root)
-    await writeFile(path.join(root, "work.config.js"), `export default {
-      project: "tilly",
-      commands: {},
-    }`)
-
-    const result = await runCli(["exec", "agent", "--", "sleep", "30"], {
-      cwd: root,
-      stateRoot,
-      env: {
-        WORK_TMUX_BIN: fakeTmuxBin,
-        WORK_TMUX_STATE_DIR: tmuxState,
-      },
-    })
-
-    assert.equal(result.exitCode, 0)
-    assert.ok(result.stdout.includes("started agent tmux=work-tilly-main"))
-
-    await runCli(["stop", "agent"], { cwd: root, stateRoot })
-  })
-
-  test("exec usage names exec", async () => {
+  test("removed tmux commands are unknown", async () => {
     const root = await tempDir()
 
-    const result = await runCli(["exec"], { cwd: root })
-
-    assert.equal(result.exitCode, 1)
-    assert.ok(result.stderr.includes("usage: work exec"))
-  })
-
-  test("start preserves help flags after --", async () => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    const tmuxState = await tempDir("tmux-fake-")
-
-    await initGitRepo(root)
-    await writeFile(path.join(root, "work.config.js"), `export default {
-      project: "tilly",
-      commands: {},
-    }`)
-
-    const result = await runCli(["start", "agent", "--", "node", "--help"], {
-      cwd: root,
-      stateRoot,
-      env: {
-        WORK_TMUX_BIN: fakeTmuxBin,
-        WORK_TMUX_STATE_DIR: tmuxState,
-      },
-    })
-
-    assert.equal(result.exitCode, 0)
-    assert.ok(result.stdout.includes("started agent"))
-
-    await runCli(["stop", "agent"], { cwd: root, stateRoot })
+    for (const name of ["start", "exec", "tmux", "attach"]) {
+      const result = await runCli([name], { cwd: root })
+      assert.equal(result.exitCode, 1)
+      assert.ok(result.stderr.includes(`unknown command: ${name}`))
+    }
   })
 
   test("metadata commands reject extra args", async () => {
@@ -668,3 +631,27 @@ describe("cli", () => {
     })
   })
 })
+
+async function cloneWithRemoteBranch(branch: string) {
+  const origin = await tempDir()
+  await initGitRepo(origin)
+  await addRemoteBranch(origin, branch)
+
+  const root = await tempDir()
+  await git(["clone", origin, "."], root)
+  await writeFile(path.join(root, "work.config.js"), `export default {
+    project: "tilly",
+    worktrees: { dir: "worktrees" },
+    commands: {},
+  }`)
+
+  return { origin, root }
+}
+
+async function addRemoteBranch(origin: string, branch: string) {
+  await git(["checkout", "-b", branch], origin)
+  await writeFile(path.join(origin, "marker.txt"), branch)
+  await git(["add", "marker.txt"], origin)
+  await git(["commit", "-m", `add ${branch}`], origin)
+  await git(["checkout", "main"], origin)
+}

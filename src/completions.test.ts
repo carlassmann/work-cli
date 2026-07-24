@@ -104,29 +104,15 @@ describe("completions", () => {
           runner: "process",
           pid: 99999999,
         },
-        agent: {
-          id: "agent",
-          label: "agent",
-          command: "agent",
-          argv: ["sleep", "30"],
-          cwd: root,
-          log: path.join(root, "agent.log"),
-          url: null,
-          startedAt: new Date().toISOString(),
-          runner: "tmux",
-          tmuxSession: "work-demo-feature-a",
-          tmuxWindow: "agent",
-        },
       },
     }))
 
-    const result = await runCli(["_complete", "workspaces", "commands", "adhoc"], { cwd: root, stateRoot })
+    const result = await runCli(["_complete", "workspaces", "commands"], { cwd: root, stateRoot })
 
     assert.equal(result.exitCode, 0)
     const lines = result.stdout.trim().split("\n")
     assert.ok(lines.includes("feature-a"))
     assert.ok(lines.includes("web"))
-    assert.ok(lines.includes("agent"))
   })
 
   test("_complete configured excludes state-only commands", async () => {
@@ -150,14 +136,12 @@ describe("completions", () => {
           id: "agent",
           label: "agent",
           command: "agent",
-          argv: ["sleep", "30"],
           cwd: root,
           log: path.join(root, "agent.log"),
           url: null,
           startedAt: new Date().toISOString(),
-          runner: "tmux",
-          tmuxSession: "work-demo-main",
-          tmuxWindow: "agent",
+          runner: "process",
+          pid: 99999999,
         },
       },
     }))

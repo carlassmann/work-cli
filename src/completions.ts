@@ -6,12 +6,12 @@ import { errResult, ok } from "./result.js"
 import { listWorkspaceStates } from "./state.js"
 import type { Result } from "./result.js"
 
-const commands = ["init", "create", "up", "setup", "down", "run", "restart", "ps", "status", "watch", "logs", "urls", "start", "exec", "tmux", "attach", "stop", "doctor", "prune", "daemon", "help", "docs", "completions", "shell-init", "cd"]
-const docsTopics = ["overview", "config", "setup", "git", "daemon", "tmux", "workspaces", "urls", "portless", "commands"]
+const commands = ["init", "create", "up", "setup", "down", "run", "restart", "ps", "status", "watch", "logs", "urls", "stop", "doctor", "prune", "daemon", "help", "docs", "completions", "shell-init", "cd"]
+const docsTopics = ["overview", "config", "setup", "git", "daemon", "workspaces", "urls", "portless", "commands"]
 const daemonActions = ["start", "stop", "status"]
 const shells = ["bash", "zsh"]
 
-type Kind = "workspaces" | "configured" | "commands" | "adhoc" | "help-topics" | "docs-topics" | "daemon-actions" | "shells"
+type Kind = "workspaces" | "configured" | "commands" | "help-topics" | "docs-topics" | "daemon-actions" | "shells"
 
 export async function complete(kinds: Array<string>): Promise<Array<string>> {
   const out = new Set<string>()
@@ -54,8 +54,6 @@ async function fetchKind(kind: Kind): Promise<Array<string>> {
       return await listConfiguredCommands()
     case "commands":
       return await listRunnableCommands()
-    case "adhoc":
-      return await listAdhocCommands()
     case "help-topics":
       return [...commands, ...docsTopics]
     case "docs-topics":
@@ -104,26 +102,6 @@ async function listRunnableCommands(): Promise<Array<string>> {
   for (const state of await listWorkspaceStates()) {
     if (!config || state.project === config.project) {
       for (const command of Object.keys(state.commands)) out.add(command)
-    }
-  }
-
-  return [...out]
-}
-
-async function listAdhocCommands(): Promise<Array<string>> {
-  const config = await tryLoadConfig()
-
-  const out = new Set<string>()
-
-  for (const state of await listWorkspaceStates()) {
-    if (config && state.project !== config.project) {
-      continue
-    }
-
-    for (const command of Object.values(state.commands)) {
-      if (command.runner === "tmux") {
-        out.add(command.id)
-      }
     }
   }
 
@@ -199,11 +177,7 @@ _work() {
     'watch:Live-refresh the ps table'
     'logs:Print or follow command logs'
     'urls:List workspace URLs'
-    'start:Start an ad-hoc tmux command'
-    'exec:Alias for start'
-    'tmux:Alias for start'
-    'attach:Attach to an ad-hoc tmux command'
-    'stop:Stop a tracked configured or ad-hoc command'
+    'stop:Stop a tracked command'
     'doctor:Check project setup'
     'prune:Remove dead process records'
     'daemon:Manage workd'
@@ -274,26 +248,15 @@ _work() {
 	        _work_emit configured
 	      fi
 	      ;;
-	    logs|stop|attach|restart)
+	    logs|stop|restart)
 	      if (( pos == 1 )); then
 	        if [[ "$has_workspace" == "1" ]]; then
-	          _work_emit commands adhoc
+	          _work_emit commands
 	        else
-	          _work_emit workspaces commands adhoc
+	          _work_emit workspaces commands
 	        fi
 	      elif (( pos == 2 && has_workspace == 0 )); then
-	        _work_emit commands adhoc
-	      fi
-	      ;;
-	    start|exec|tmux)
-	      if (( pos == 1 )); then
-	        if [[ "$has_workspace" == "1" ]]; then
-	          _work_emit adhoc
-	        else
-	          _work_emit workspaces adhoc
-	        fi
-	      elif (( pos == 2 && has_workspace == 0 )); then
-	        _work_emit adhoc
+	        _work_emit commands
 	      fi
       ;;
     help)
@@ -323,7 +286,8 @@ _work_emit() {
 _work_emit_flags() {
   local -a flags
   case "$1" in
-    up) flags=(--create --no-create) ;;
+    create) flags=(--remote) ;;
+    up) flags=(--create --no-create --remote) ;;
     down) flags=(-a --all -p --project) ;;
     run) flags=(-w --workspace) ;;
     restart) flags=(-a --all -p --project -w --workspace) ;;
@@ -331,8 +295,7 @@ _work_emit_flags() {
     watch) flags=(-a --all -n --interval) ;;
     logs) flags=(-f --follow -p --project -w --workspace) ;;
     urls) flags=(-p --project) ;;
-    start|exec|tmux) flags=(-a --attach -w --workspace) ;;
-    attach|stop) flags=(-p --project -w --workspace) ;;
+    stop) flags=(-p --project -w --workspace) ;;
     *) flags=() ;;
   esac
   flags+=(-h --help)
@@ -443,7 +406,7 @@ const bashScript = `_work() {
     if [[ "$cur" == -* ]]; then
       COMPREPLY=( $(compgen -W "-h --help -v --version" -- "$cur") )
     else
-      COMPREPLY=( $(compgen -W "init create up setup down run restart ps status watch logs urls start exec tmux attach stop doctor prune daemon help docs completions shell-init cd" -- "$cur") )
+      COMPREPLY=( $(compgen -W "init create up setup down run restart ps status watch logs urls stop doctor prune daemon help docs completions shell-init cd" -- "$cur") )
     fi
     return
   fi
@@ -505,26 +468,15 @@ const bashScript = `_work() {
 	        values=$(work _complete configured 2>/dev/null)
 	      fi
 	      ;;
-	    logs|stop|attach|restart)
+	    logs|stop|restart)
 	      if [[ $pos -eq 1 ]]; then
 	        if [[ "$has_workspace" == "1" ]]; then
-	          values=$(work _complete commands adhoc 2>/dev/null)
+	          values=$(work _complete commands 2>/dev/null)
 	        else
-	          values=$(work _complete workspaces commands adhoc 2>/dev/null)
+	          values=$(work _complete workspaces commands 2>/dev/null)
 	        fi
 	      elif [[ $pos -eq 2 && "$has_workspace" == "0" ]]; then
-	        values=$(work _complete commands adhoc 2>/dev/null)
-	      fi
-	      ;;
-	    start|exec|tmux)
-	      if [[ $pos -eq 1 ]]; then
-	        if [[ "$has_workspace" == "1" ]]; then
-	          values=$(work _complete adhoc 2>/dev/null)
-	        else
-	          values=$(work _complete workspaces adhoc 2>/dev/null)
-	        fi
-	      elif [[ $pos -eq 2 && "$has_workspace" == "0" ]]; then
-	        values=$(work _complete adhoc 2>/dev/null)
+	        values=$(work _complete commands 2>/dev/null)
 	      fi
       ;;
     help)
@@ -556,7 +508,8 @@ complete -F _work work
 
 _work_flags() {
   case "$1" in
-    up) echo "--create --no-create -h --help" ;;
+    create) echo "--remote -h --help" ;;
+    up) echo "--create --no-create --remote -h --help" ;;
     down) echo "-a --all -p --project -h --help" ;;
     run) echo "-w --workspace -h --help" ;;
     restart) echo "-a --all -p --project -w --workspace -h --help" ;;
@@ -564,8 +517,7 @@ _work_flags() {
     watch) echo "-a --all -n --interval -h --help" ;;
     logs) echo "-f --follow -p --project -w --workspace -h --help" ;;
     urls) echo "-p --project -h --help" ;;
-    start|exec|tmux) echo "-a --attach -w --workspace -h --help" ;;
-    attach|stop) echo "-p --project -w --workspace -h --help" ;;
+    stop) echo "-p --project -w --workspace -h --help" ;;
     *) echo "-h --help" ;;
   esac
 }

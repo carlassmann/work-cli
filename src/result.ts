@@ -7,7 +7,6 @@ export type ErrorTag =
   | "GitError"
   | "WorkspaceError"
   | "PortlessError"
-  | "TmuxError"
   | "DaemonError"
   | "IOError"
   | "ProcessError"

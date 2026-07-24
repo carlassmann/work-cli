@@ -2,14 +2,14 @@
 import fs from "node:fs/promises"
 import net from "node:net"
 import { debugLog, describe, formatError } from "./result.js"
-import { pruneDeadCommands, restartTrackedCommand, startAdhocCommand, startCommand, stopCommand } from "./processes.js"
+import { pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
 
 const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
-  ["run", "adhoc", "down", "stop", "restart", "restartTracked", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
+  ["run", "down", "stop", "restart", "restartTracked", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
 )
 
 type DesiredCommand = {
@@ -118,11 +118,6 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
     case "run":
       return serialize(workspaceLock(command.config.project, command.workspace.workspace), () =>
         startDesired(command.config, command.workspace, command.command),
-      )
-
-    case "adhoc":
-      return serialize(workspaceLock(command.config.project, command.workspace.workspace), () =>
-        startAdhocCommand(command.config, command.workspace, command.id, command.argv),
       )
 
     case "down":

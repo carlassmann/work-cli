@@ -15,9 +15,9 @@ You hit "new worktree" in Codex, or start Claude Code with `--worktree`. Now you
 - get the env vars right — maybe
 - get the supporting services (db, queue, sync server, …) isolated from the other worktrees — meh
 - and now those isolated services need their own URLs and credentials threaded back into the env — urgh
-- open a terminal for each long-running process — and another for the agent — times every worktree you're juggling
+- open a terminal for each long-running process — times every worktree you're juggling
 
-Your agent runs for 30+ minutes, so you'd like to spin up the next worktree in parallel. Instead you have a dozen terminals open per workspace and you've lost track of which one is which.
+Your agent runs for 30+ minutes, so you'd like to spin up the next worktree in parallel. Instead you have a pile of terminals open per workspace and you've lost track of which one is which.
 
 The individual pieces are already solved:
 
@@ -25,7 +25,6 @@ The individual pieces are already solved:
 | ---------------------- | ------------------------------------------------- |
 | `git worktree`         | coexisting checkouts per branch                   |
 | [`portless`][portless] | stable `*.localhost` URLs, no port collisions     |
-| `tmux`                 | terminals that survive when you close the window  |
 
 `work` is the glue: a per-workspace setup script, a config of long-running commands, a tiny supervisor, and a single CLI to drive it.
 
@@ -37,11 +36,10 @@ Zero runtime dependencies — just Node ≥ 20 stdlib. The full CLI ships as one
 
 ```sh
 work create feature-x       # create a worktree without setup or processes
+work create feature-x --remote origin  # fetch + track a remote branch
 work up feature-x --create   # create worktree, run setup, start configured servers
 work urls feature-x          # see where everything is reachable
 work logs -f web             # tail one service
-work start claude -- claude  # park an interactive command in tmux
-work attach claude           # come back to it later
 work down feature-x          # tear it all down
 ```
 
@@ -66,7 +64,7 @@ bun run build
 bun link
 ```
 
-Optional but recommended: install [`portless`][portless] (for `route: true` commands) and `tmux` (for ad-hoc interactive commands). Verify with `work doctor`.
+Optional but recommended: install [`portless`][portless] (for `route: true` commands). Verify with `work doctor`.
 
 Shell integration (completion + `work cd`) — add to `~/.zshrc` or `~/.bashrc`:
 
@@ -129,21 +127,14 @@ work up chat-streaming --create
 # Open the web app. Sync server is already wired up via the env var.
 open https://web-chat-streaming-tilly.localhost
 
-# Park Claude Code in a tmux window for this workspace.
-work start --attach claude -- claude --dangerously-skip-permissions
-
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
 work up image-uploads --create
-work start -w image-uploads claude -- claude
 
 # Or just create a clean worktree without setup or servers.
 work create refactor-sidebar
 
 # Need to debug? Tail the sync server logs.
 work logs -f -w chat-streaming sync
-
-# Come back to the first agent.
-work attach -w chat-streaming claude
 
 # Done with this branch — stop everything.
 work down chat-streaming
@@ -172,10 +163,25 @@ work up           # start the configured servers (no --create needed)
 
 The workspace name is the slugified branch name. The worktree root is `$PWD`. No path flag needed.
 
+### Checking out a remote branch
+
+When the worktree doesn't exist yet, `work create` (and `work up --create`) resolves the branch like `git checkout` does:
+
+1. a local branch with that name → used as-is
+2. exactly one remote has the branch → fetched, then checked out as a local tracking branch
+3. otherwise → a new branch off `HEAD`
+
+To grab a branch you've never fetched, name the remote — `work` fetches it first and fails if the branch doesn't exist there:
+
+```sh
+work create feature-x --remote origin
+work up feature-x --create --remote origin   # same, plus setup + servers
+```
+
+Branch names keep their real spelling; only the workspace slug is normalized (`feat/foo` → workspace `feat-foo`, branch stays `feat/foo`).
+
 [tilly]: https://github.com/ccssmnn/tilly
 [jazz]: https://jazz.tools
-
-## Reference
 
 ## Reference
 
@@ -183,7 +189,7 @@ The workspace name is the slugified branch name. The worktree root is `$PWD`. No
 work --help              # all subcommands
 work <command> --help    # one subcommand
 work help run            # same help, command form
-work docs                # list built-in topics (config, urls, daemon, tmux, …)
+work docs                # list built-in topics (config, urls, daemon, …)
 work docs config         # full config field reference
 work docs setup          # setup-hook env vars
 ```

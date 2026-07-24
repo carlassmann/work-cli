@@ -6,9 +6,9 @@ import { spawn } from "node:child_process"
 import { stdin as input, stdout as output } from "node:process"
 import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
-import { createWorktree, gitBranch, gitMainWorktree, gitRoot, workspaceFromGit } from "./git.js"
+import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
-import { attachCommand, commandDisplayStatus, stopCommand as stopTrackedCommand } from "./processes.js"
+import { commandRuntimeStatus, stopCommand as stopTrackedCommand } from "./processes.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
@@ -24,6 +24,7 @@ const VERSION = "0.1.0"
 
 type WorkspaceResolution = WorkspaceRecord & {
   created: boolean
+  createdFrom?: string
 }
 
 type ProjectContext = {
@@ -120,10 +121,6 @@ async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Resu
     case "watch":        return runWatch(args)
     case "logs":         return runLogs(args)
     case "urls":         return runUrls(args)
-    case "start":        return runStart(args, name)
-    case "exec":         return runStart(args, name)
-    case "tmux":         return runStart(args, name)
-    case "attach":       return runAttach(args)
     case "stop":         return runStop(args)
     case "doctor":       return runDoctor(args)
     case "prune":        return runPrune(args)
@@ -168,12 +165,14 @@ async function runInit(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, {
+    flags: { remote: valueFlag() },
+  })
   if (!parsed.ok) return parsed
 
   const workspaceName = parsed.value.positional[0]
   if (!workspaceName) {
-    return errResult("CLIError", "missing workspace. Usage: work create <workspace>")
+    return errResult("CLIError", "missing workspace. Usage: work create <workspace> [--remote <name>]")
   }
   const extra = unexpectedPositional(parsed.value.positional, 1)
   if (extra) return extra
@@ -181,20 +180,21 @@ async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
-  const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: true, noCreate: false })
+  const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: true, noCreate: false, remote: parsed.value.flags.remote })
   if (!workspace.ok) return workspace
 
   if (workspace.value.root === ctx.value.cwdRoot) {
     return errResult("WorkspaceError", `workspace ${workspace.value.workspace} is the current worktree`)
   }
 
-  console.log(`${workspace.value.created ? "created" : "exists"} ${workspace.value.workspace}\t${workspace.value.root}`)
+  const suffix = workspace.value.created ? ` from ${workspace.value.createdFrom}` : ""
+  console.log(`${workspace.value.created ? "created" : "exists"} ${workspace.value.workspace}${suffix}\t${workspace.value.root}`)
   return ok(undefined)
 }
 
 async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { create: booleanFlag(), "no-create": booleanFlag() },
+    flags: { create: booleanFlag(), "no-create": booleanFlag(), remote: valueFlag() },
   })
   if (!parsed.ok) return parsed
 
@@ -203,19 +203,24 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (extra) return extra
   const create = parsed.value.flags.create
   const noCreate = parsed.value.flags["no-create"]
+  const remote = parsed.value.flags.remote
   if (create && noCreate) {
     return errResult("CLIError", "work up accepts only one of --create or --no-create")
+  }
+  if (remote && noCreate) {
+    return errResult("CLIError", "work up --remote conflicts with --no-create")
   }
 
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
-  const workspace = await resolveWorkspace(ctx.value, workspaceName, { create, noCreate })
+  const workspace = await resolveWorkspace(ctx.value, workspaceName, { create, noCreate, remote })
   if (!workspace.ok) return workspace
 
   const commands = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
 
   if (workspace.value.created) {
+    console.log(`created ${workspace.value.workspace} from ${workspace.value.createdFrom}`)
     const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value)
     if (!setup.ok) return setup
   }
@@ -397,11 +402,11 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const commandConfig = ctx.value.config.commands[target]
 
-  if (commandConfig) {
-    return restartConfigured(ctx.value, workspace.value, target, commandConfig)
+  if (!commandConfig) {
+    return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, target, Object.keys(ctx.value.config.commands)))
   }
 
-  return restartAdhoc(ctx.value, workspace.value, target)
+  return restartConfigured(ctx.value, workspace.value, target, commandConfig)
 }
 
 async function restartAll(ctx: ProjectContext, workspace: WorkspaceResolution): Promise<Result<void>> {
@@ -438,32 +443,6 @@ async function restartConfigured(ctx: ProjectContext, workspace: WorkspaceResolu
   if (!response.ok) return response
 
   printProcessStart(id, response.value.data, "restarted")
-  return ok(undefined)
-}
-
-async function restartAdhoc(ctx: ProjectContext, workspace: WorkspaceResolution, id: string): Promise<Result<void>> {
-  const stateResult = await readWorkspaceState(ctx.config.project, workspace.workspace)
-  if (!stateResult.ok) return stateResult
-
-  const record = stateResult.value?.commands[id]
-  if (record?.runner !== "tmux") {
-    return errResult("CLIError", await unknownTrackedCommandMessage(ctx.config.project, workspace.workspace, id, Object.keys(ctx.config.commands)))
-  }
-
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const stop = await sendDaemon({ type: "stop", project: ctx.config.project, workspace: workspace.workspace, command: record.id })
-  if (!stop.ok) return stop
-
-  const response = await sendDaemon({ type: "adhoc", config: ctx.config, workspace, id: record.id, argv: record.argv })
-  if (!response.ok) return response
-
-  if (response.value.data.record.runner !== "tmux") {
-    return errResult("ProcessError", `expected tmux runner for adhoc ${record.id}`)
-  }
-
-  printTmuxStart("restarted", record.id, response.value.data.record.tmuxSession)
   return ok(undefined)
 }
 
@@ -557,9 +536,8 @@ async function trackedCommandTable(all: boolean): Promise<Result<string>> {
 
   for (const state of statesResult.value) {
     for (const command of Object.values(state.commands)) {
-      const status = await commandDisplayStatus(command)
-      const handle = command.runner === "tmux" ? command.tmuxSession : command.pid
-      rows.push([status, `${state.project}/${state.workspace}`, command.id, command.runner, String(handle), command.url ?? ""])
+      const status = await commandRuntimeStatus(command)
+      rows.push([status, `${state.project}/${state.workspace}`, command.id, String(command.pid), command.url ?? ""])
     }
   }
 
@@ -567,7 +545,7 @@ async function trackedCommandTable(all: boolean): Promise<Result<string>> {
     return ok("no tracked commands")
   }
 
-  return ok(formatTable([["status", "workspace", "command", "runner", "handle", "url"], ...rows]))
+  return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
 }
 
 function interruptibleSleep(ms: number, stopped: () => boolean): Promise<void> {
@@ -708,54 +686,6 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function runStart(args: ReadonlyArray<string>, commandName = "start"): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), attach: booleanFlag("a") }, acceptRest: true })
-  if (!parsed.ok) return parsed
-
-  const target = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
-  if (!target.ok) return target
-  const id = target.value.command
-
-  if (!id || !parsed.value.rest || parsed.value.rest.length === 0) {
-    return errResult("CLIError", `usage: work ${commandName} [workspace] <id> -- <command> | work ${commandName} -w workspace <id> -- <command>`)
-  }
-
-  const slug = validateSlug(id, "command")
-  if (!slug.ok) return slug
-
-  const ctx = await loadProjectContext()
-  if (!ctx.ok) return ctx
-
-  const workspace = await resolveWorkspace(ctx.value, target.value.workspace, { create: false, noCreate: true })
-  if (!workspace.ok) return workspace
-
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "adhoc", config: ctx.value.config, workspace: workspace.value, id, argv: [...parsed.value.rest] })
-  if (!response.ok) return response
-
-  const record = response.value.data.record
-  if (record.runner !== "tmux") {
-    return errResult("ProcessError", `expected tmux runner for adhoc ${id}`)
-  }
-
-  printTmuxStart(response.value.data.started ? "started" : "already up", id, record.tmuxSession)
-
-  if (!parsed.value.flags.attach) {
-    return ok(undefined)
-  }
-
-  return attachCommand(ctx.value.config.project, workspace.value.workspace, id)
-}
-
-async function runAttach(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const wsCmd = await parseWorkspaceAndCommand(args, "attach")
-  if (!wsCmd.ok) return wsCmd
-
-  return attachCommand(wsCmd.value.project, wsCmd.value.workspace, wsCmd.value.command)
-}
-
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   const wsCmd = await parseWorkspaceAndCommand(args, "stop")
   if (!wsCmd.ok) return wsCmd
@@ -807,7 +737,6 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const needsPortless = config?.ok ? Object.values(config.value.commands).some(usesPortless) : false
   console.log(`portless\t${needsPortless ? await commandExists("portless") ? "ok" : "missing" : "not needed"}`)
-  console.log(`tmux\t${await commandExists("tmux") ? "ok" : "missing"}`)
 
   const status = await daemonStatus()
   console.log(`workd\t${status.running ? `ok\tpid=${status.pid}` : "stopped"}`)
@@ -954,7 +883,7 @@ async function runComplete(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function parseWorkspaceAndCommand(args: ReadonlyArray<string>, commandName: "attach" | "stop"): Promise<Result<{ project: string; workspace: string; command: string }>> {
+async function parseWorkspaceAndCommand(args: ReadonlyArray<string>, commandName: "stop"): Promise<Result<{ project: string; workspace: string; command: string }>> {
   const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
 
@@ -1149,12 +1078,7 @@ function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: Wor
 }
 
 function printProcessStart(command: string, result: StartResult, verb = result.started ? "started" : "already up") {
-  const handle = result.record.runner === "process" ? ` pid=${result.record.pid}` : ""
-  console.log(`${verb} ${command}${handle}${result.record.url ? ` ${result.record.url}` : ""}`)
-}
-
-function printTmuxStart(verb: string, command: string, tmuxSession: string | undefined) {
-  console.log(`${verb} ${command} tmux=${tmuxSession ?? "unknown"}`)
+  console.log(`${verb} ${command} pid=${result.record.pid}${result.record.url ? ` ${result.record.url}` : ""}`)
 }
 
 function commandNames() {
@@ -1171,10 +1095,6 @@ function commandNames() {
     "watch",
     "logs",
     "urls",
-    "start",
-    "exec",
-    "tmux",
-    "attach",
     "stop",
     "doctor",
     "prune",
@@ -1188,7 +1108,7 @@ function commandNames() {
 }
 
 function docsTopics() {
-  return ["overview", "config", "setup", "git", "daemon", "tmux", "workspaces", "urls", "portless", "commands"]
+  return ["overview", "config", "setup", "git", "daemon", "workspaces", "urls", "portless", "commands"]
 }
 
 function unexpectedPositional(positional: ReadonlyArray<string>, count: number): Result<never> | null {
@@ -1236,7 +1156,7 @@ function levenshtein(a: string, b: string) {
 async function resolveWorkspace(
   ctx: ProjectContext,
   name: string | undefined,
-  flags: { create: boolean; noCreate: boolean },
+  flags: { create: boolean; noCreate: boolean; remote?: string | undefined },
 ): Promise<Result<WorkspaceResolution>> {
   const { config, root, cwdRoot } = ctx
   const currentResult = await workspaceFromGit(cwdRoot)
@@ -1266,20 +1186,35 @@ async function resolveWorkspace(
       return errResult("WorkspaceError", `workspace ${workspace} does not exist`)
     }
 
-    if (!flags.create && !await confirm(`Workspace ${workspace} does not exist. Create worktree from HEAD?`)) {
+    const source = await resolveBranchSource(root, name, workspace, flags.remote)
+    if (!source.ok) return source
+    const sourceDescription = describeBranchSource(source.value)
+
+    if (!flags.create && !await confirm(`Workspace ${workspace} does not exist. Create worktree from ${sourceDescription}?`)) {
       return errResult("WorkspaceError", `workspace ${workspace} does not exist`)
     }
 
-    const created = await createWorktree(root, worktreeRoot, workspace)
+    const created = await createWorktree(root, worktreeRoot, source.value)
     if (!created.ok) return created
+
+    return ok({
+      project: config.project,
+      workspace,
+      branch: source.value.branch,
+      root: worktreeRoot,
+      created: true,
+      createdFrom: sourceDescription,
+    })
   }
+
+  const worktreeBranch = await gitBranch(worktreeRoot)
 
   return ok({
     project: config.project,
     workspace,
-    branch: workspace,
+    branch: worktreeBranch.ok && worktreeBranch.value ? worktreeBranch.value : workspace,
     root: worktreeRoot,
-    created: !exists,
+    created: false,
   })
 }
 

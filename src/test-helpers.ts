@@ -16,7 +16,7 @@ export async function writeFile(file: string, source: string) {
   await fs.writeFile(file, source)
 }
 
-async function git(args: Array<string>, cwd: string) {
+export async function git(args: Array<string>, cwd: string) {
   return await execFileAsync("git", args, { cwd })
 }
 

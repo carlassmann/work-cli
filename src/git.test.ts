@@ -18,7 +18,7 @@ describe("git worktrees", () => {
     await execFileAsync("git", ["worktree", "add", "-b", "test", dir], { cwd: root })
     await fs.rm(dir, { recursive: true, force: true })
 
-    const result = await createWorktree(root, dir, "test")
+    const result = await createWorktree(root, dir, { kind: "local", branch: "test" })
 
     assert.equal(result.ok, false)
     if (!result.ok) {

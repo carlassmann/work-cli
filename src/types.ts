@@ -44,20 +44,13 @@ export type ProcessCommandRecord = CommandRecordBase & {
   pid: number
 }
 
-export type TmuxCommandRecord = CommandRecordBase & {
-  runner: "tmux"
-  argv: Array<string>
-  tmuxSession: string
-  tmuxWindow: string
-}
-
-export type CommandRecord = ProcessCommandRecord | TmuxCommandRecord
+export type CommandRecord = ProcessCommandRecord
 
 export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 2
+export const DAEMON_PROTOCOL_VERSION = 3
 
 export type DaemonCommand =
   | {
@@ -65,13 +58,6 @@ export type DaemonCommand =
       config: DevConfig
       workspace: WorkspaceRecord
       command: string
-    }
-  | {
-      type: "adhoc"
-      config: DevConfig
-      workspace: WorkspaceRecord
-      id: string
-      argv: Array<string>
     }
   | {
       type: "down"
@@ -114,7 +100,6 @@ export type StartResult = {
 type DaemonResults = {
   ping: { pid: number }
   run: StartResult
-  adhoc: StartResult
   restart: StartResult
   restartTracked: StartResult
   down: Array<string>

@@ -8,14 +8,11 @@ commands stable local URLs.
 work intentionally sits on top of existing tools:
   git       owns repositories, branches, and worktrees
   portless  owns HTTPS local routing and port allocation
-  tmux      owns resumable interactive commands
 
 Core workflow:
   work init my-project
   work up feature-x --create
   work run -w feature-x web
-  work start -w feature-x claude -- claude
-  work attach -w feature-x claude
   work status
   work urls feature-x
   work logs -f -w feature-x web
@@ -134,13 +131,14 @@ Commands using git:
   work init                 finds the git root when possible
   work up                   derives workspace from current branch
   work up feature-x         creates ../project.worktrees/feature-x when needed
+  work create x --remote origin   fetches and tracks a remote branch
   work setup feature-x      resolves an existing worktree
   work run/restart/logs     use current branch when workspace is omitted
 
 State-only commands:
   ps/status/prune/daemon/docs/completions/shell-init/doctor do not need config
-  logs/urls/attach/stop/down/restart can use tracked state outside a project
-  up/setup/run/start/cd need work.config.js
+  logs/urls/stop/down/restart can use tracked state outside a project
+  up/setup/run/cd need work.config.js
 
 Why:
   git already knows branches and worktrees
@@ -175,52 +173,6 @@ Restart policy:
 The daemon communicates over a Unix socket in ~/.work-cli.
 Logs and state remain file-based so they are inspectable.`,
 
-  tmux: `Ad-hoc commands share one tmux session per workspace.
-Each command becomes a named window in that session.
-
-Session name:  work-<project>-<workspace>
-Window name:   <command id>
-
-work owns:
-  command ids
-  workspace association
-  state records
-  log paths
-
-tmux owns:
-  interactive process lifetime
-  attach and detach
-  switching between windows (prefix + w, prefix + n, prefix + p)
-
-Start:
-  work start claude -- claude
-  work start --attach claude -- claude
-  work start claude -- claude --dangerously-skip-permissions
-  work start shell -- zsh
-  work start -w feature-x claude -- claude
-
-Attach:
-  work attach claude                 attach session, focus the claude window
-  work attach -w feature-x claude    same, explicit workspace
-
-Once attached, switch between windows for the same workspace
-using the tmux prefix (prefix + w lists them).
-
-Stop:
-  work stop claude
-  work stop -w feature-x claude
-
-Stopping the last window in a session ends the session.
-
-Logs:
-  work logs claude
-  work logs -f claude
-
-State:
-  ad-hoc commands live only in work state
-  work.config.js is not edited
-  tmux is only required for start/attach`,
-
   workspaces: `Workspace identity is project + workspace.
 
 Project:
@@ -237,6 +189,12 @@ Worktree behavior:
   work up feature-x       asks before creating when missing
   work up feature-x --create     creates without asking
   work up feature-x --no-create  fails if missing
+
+Branch resolution when creating:
+  local branch feature-x         used as-is
+  one remote has feature-x       fetched and tracked (like git checkout)
+  --remote origin                fetches origin/feature-x first, fails if missing
+  otherwise                      new branch from HEAD
 
 Setup behavior:
   work up feature-x --create     runs worktrees.setup after creating
@@ -293,10 +251,10 @@ Config:
   work init [project]
     create work.config.js
 
-  work create <workspace>
+  work create <workspace> [--remote <name>]
     create a git worktree without setup or commands
 
-  work up [workspace] [--create|--no-create]
+  work up [workspace] [--create|--no-create] [--remote <name>]
     start autoStart commands for a workspace
 
   work setup [workspace]
@@ -306,22 +264,13 @@ Config:
   work down --all
     stop tracked commands for a workspace, current project, or all projects
 
-  work start [-a] [workspace] <id> -- <command>
-  work exec [-a] [workspace] <id> -- <command>
-  work tmux [-a] [workspace] <id> -- <command>
-    start an ad-hoc command in tmux
-
-  work attach [workspace] <id>
-  work attach [-p project] [-w workspace] <id>
-    attach to an ad-hoc tmux command
-
   work stop [workspace] <id>
   work stop [-p project] [-w workspace] <id>
-    stop a tracked configured or ad-hoc command
+    stop a tracked command
 
   work restart [workspace] <command>
   work restart [-p project] [-w workspace] <command>
-    stop and start one configured or ad-hoc command
+    stop and start one configured command
 
   work restart [-p project] [-w workspace] --all
     stop and start autoStart commands, or tracked commands outside a project
@@ -347,7 +296,7 @@ Config:
     print known URLs for routed commands
 
   work doctor
-    check git, config, portless, tmux, and command setup
+    check git, config, portless, and command setup
 
   work prune
     remove dead process records
