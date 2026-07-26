@@ -4,13 +4,12 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
-import { routeName, routeUrl } from "./names.js"
-import { portlessUrl, routeEnvironment, routeEnvironmentForConfig, spawnCommand } from "./portless.js"
+import { commandProcess, commandRoute, portlessUrl, routeEnvironment, routeEnvironmentForConfig } from "./portless.js"
 import { isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
-import type { CommandRecord, DevConfig, ProcessCommandRecord, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { CommandRecord, DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
 
-export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string): Promise<Result<{ record: ProcessCommandRecord; started: boolean }>> {
+export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const command = config.commands[id]
 
   if (!command) {
@@ -25,23 +24,15 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
   const state = stateResult.value
   const existing = state?.commands[id]
 
-  if (existing?.runner === "process" && isPidRunning(existing.pid)) {
+  if (existing && isPidRunning(existing.pid)) {
     return ok({ record: existing, started: false })
   }
 
-  const mkdir = await tryAsync("IOError", "failed to create log directory", async () =>
-    await fsp.mkdir(path.dirname(log), { recursive: true }),
-  )
-  if (!mkdir.ok) return mkdir
-
-  const openLog = trySync("IOError", `failed to open log file ${log}`, () => fs.openSync(log, "a"))
-  if (!openLog.ok) return openLog
-
-  const commandProcess = spawnCommand(config, workspace.workspace, id, command)
-  const spawned = await spawnWithLog(commandProcess.executable, commandProcess.args, {
+  const route = commandRoute(config, workspace.workspace, id, command)
+  const commandExec = commandProcess(command.run, route)
+  const pid = await spawnLogged(id, commandExec, {
     cwd,
-    shell: commandProcess.shell,
-    output: openLog.value,
+    log,
     env: {
       ...process.env,
       WORK_PROJECT: config.project,
@@ -51,20 +42,15 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
       ...command.env,
     },
   })
+  if (!pid.ok) return pid
 
-  if (!spawned.ok) return spawned
-  spawned.value.unref()
-
-  if (!spawned.value.pid) {
-    return errResult("ProcessError", `spawn produced no pid for ${id}`)
-  }
-
-  const record: ProcessCommandRecord = {
+  const record: CommandRecord = {
     id,
     label: command.label ?? id,
-    runner: "process",
-    pid: spawned.value.pid,
-    command: commandProcess.display,
+    pid: pid.value,
+    command: commandExec.display,
+    run: command.run,
+    route,
     cwd,
     log,
     url: portlessUrl(config, workspace.workspace, id, command),
@@ -78,11 +64,40 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
 
   const write = await writeWorkspaceState(nextState)
   if (!write.ok) {
-    await stopProcessTree(spawned.value.pid)
+    await stopProcessTree(pid.value)
     return write
   }
 
   return ok({ record, started: true })
+}
+
+async function spawnLogged(
+  id: string,
+  commandExec: ReturnType<typeof commandProcess>,
+  options: { cwd: string; log: string; env: NodeJS.ProcessEnv },
+): Promise<Result<number>> {
+  const mkdir = await tryAsync("IOError", "failed to create log directory", async () =>
+    await fsp.mkdir(path.dirname(options.log), { recursive: true }),
+  )
+  if (!mkdir.ok) return mkdir
+
+  const openLog = trySync("IOError", `failed to open log file ${options.log}`, () => fs.openSync(options.log, "a"))
+  if (!openLog.ok) return openLog
+
+  const spawned = await spawnWithLog(commandExec.executable, commandExec.args, {
+    cwd: options.cwd,
+    shell: commandExec.shell,
+    output: openLog.value,
+    env: options.env,
+  })
+  if (!spawned.ok) return spawned
+  spawned.value.unref()
+
+  if (!spawned.value.pid) {
+    return errResult("ProcessError", `spawn produced no pid for ${id}`)
+  }
+
+  return ok(spawned.value.pid)
 }
 
 function freshState(workspace: WorkspaceRecord): WorkspaceState {
@@ -127,23 +142,18 @@ export async function restartTrackedCommand(project: string, workspace: string, 
     return errResult("ProcessError", `no tracked command: ${workspace}/${id}`)
   }
 
+  if (typeof command.run !== "string") {
+    return errResult("ProcessError", `tracked record for ${workspace}/${id} predates this work version. Run: work stop ${id} && work run ${id}`)
+  }
+
   if (isPidRunning(command.pid)) {
     await stopProcessTree(command.pid)
   }
 
-  const mkdir = await tryAsync("IOError", "failed to create log directory", async () =>
-    await fsp.mkdir(path.dirname(command.log), { recursive: true }),
-  )
-  if (!mkdir.ok) return mkdir
-
-  const openLog = trySync("IOError", `failed to open log file ${command.log}`, () => fs.openSync(command.log, "a"))
-  if (!openLog.ok) return openLog
-
-  const commandProcess = trackedProcessCommand(state, command)
-  const spawned = await spawnWithLog(commandProcess.executable, commandProcess.args, {
+  const commandExec = commandProcess(command.run, command.route)
+  const pid = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
-    shell: commandProcess.shell,
-    output: openLog.value,
+    log: command.log,
     env: {
       ...process.env,
       WORK_PROJECT: project,
@@ -152,25 +162,19 @@ export async function restartTrackedCommand(project: string, workspace: string, 
       ...routeEnvironment(stateRouteUrls(state)),
     },
   })
-  if (!spawned.ok) return spawned
-  spawned.value.unref()
+  if (!pid.ok) return pid
 
-  if (!spawned.value.pid) {
-    return errResult("ProcessError", `spawn produced no pid for ${id}`)
-  }
-
-  const record: ProcessCommandRecord = {
+  const record: CommandRecord = {
     ...command,
-    pid: spawned.value.pid,
-    command: commandProcess.display,
-    url: commandProcess.url,
+    pid: pid.value,
+    command: commandExec.display,
     startedAt: new Date().toISOString(),
   }
 
   state.commands[id] = record
   const write = await writeWorkspaceState(state)
   if (!write.ok) {
-    await stopProcessTree(spawned.value.pid)
+    await stopProcessTree(pid.value)
     return write
   }
 
@@ -183,51 +187,6 @@ function stateRouteUrls(state: WorkspaceState) {
       .map(([id, command]) => [id, command.url])
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   )
-}
-
-function trackedProcessCommand(state: WorkspaceState, command: ProcessCommandRecord) {
-  const routed = parsePortlessCommand(command.command)
-
-  if (!routed) {
-    return {
-      executable: command.command,
-      args: [],
-      shell: true,
-      display: command.command,
-      url: command.url,
-    }
-  }
-
-  const route = routeName(state.project, state.workspace, command.id, routePrefix(state, command, routed.route))
-  const run = routed.run
-
-  return {
-    executable: "portless",
-    args: [route, "sh", "-lc", run],
-    shell: false,
-    display: `portless ${route} sh -lc ${JSON.stringify(run)}`,
-    url: routeUrl(state.project, state.workspace, command.id, routePrefix(state, command, routed.route)),
-  }
-}
-
-function parsePortlessCommand(command: string): { route: string; run: string } | null {
-  const match = command.match(/^portless\s+(\S+)\s+sh\s+-lc\s+(.+)$/)
-  if (!match) return null
-
-  try {
-    return { route: match[1], run: JSON.parse(match[2]) as string }
-  } catch {
-    return null
-  }
-}
-
-function routePrefix(state: WorkspaceState, command: ProcessCommandRecord, route: string) {
-  if (route.includes(".")) return route.split(".")[0]
-
-  const suffix = `-${state.workspace}-${state.project}`
-  if (route.endsWith(suffix)) return route.slice(0, -suffix.length)
-
-  return command.id
 }
 
 export async function pruneDeadCommands(): Promise<Result<number>> {

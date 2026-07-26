@@ -59,23 +59,25 @@ function envName(id: string) {
   return id.replace(/-/g, "_").toUpperCase()
 }
 
-export function spawnCommand(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
-  if (!usesPortless(command)) {
+export function commandRoute(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
+  return usesPortless(command) ? routeName(config.project, workspace, id, command.routeName) : null
+}
+
+export function commandProcess(run: string, route: string | null) {
+  if (!route) {
     return {
-      executable: command.run,
+      executable: run,
       args: [],
       shell: true,
-      display: command.run,
+      display: run,
     }
   }
 
-  const route = routeName(config.project, workspace, id, command.routeName)
-
   return {
     executable: "portless",
-    args: [route, "sh", "-lc", command.run],
+    args: [route, "sh", "-lc", run],
     shell: false,
-    display: `portless ${route} sh -lc ${JSON.stringify(command.run)}`,
+    display: `portless ${route} sh -lc ${JSON.stringify(run)}`,
   }
 }
 

@@ -29,22 +29,18 @@ export type WorkspaceRecord = {
   root: string
 }
 
-type CommandRecordBase = {
+export type CommandRecord = {
   id: string
   label: string
   command: string
+  run: string
+  route: string | null
   cwd: string
   log: string
   url: string | null
   startedAt: string
-}
-
-export type ProcessCommandRecord = CommandRecordBase & {
-  runner: "process"
   pid: number
 }
-
-export type CommandRecord = ProcessCommandRecord
 
 export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>

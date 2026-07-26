@@ -17,22 +17,22 @@ const PING_INTERVAL_MS = 50
 export type DaemonStatus = { running: boolean; pid: number | null }
 
 export async function daemonStatus(): Promise<DaemonStatus> {
-  const pid = await readDaemonPid()
+  const ping = await sendDaemon({ type: "ping" })
 
-  if (pid && isPidRunning(pid)) {
-    const ping = await sendDaemon({ type: "ping" })
-    if (ping.ok) {
-      return { running: true, pid }
-    }
+  if (ping.ok) {
+    return { running: true, pid: ping.value.data.pid }
   }
 
-  // Pidfile may be missing or stale; the daemon may still be reachable.
-  const probe = await sendDaemon({ type: "ping" })
-  if (probe.ok) {
-    return { running: true, pid: probe.value.data.pid }
-  }
+  return { running: false, pid: await readDaemonPid() }
+}
 
-  return { running: false, pid }
+export async function callDaemon<T extends DaemonCommand>(
+  command: T,
+): Promise<Result<{ message?: string; data: DaemonResultType<T["type"]> }>> {
+  const daemon = await ensureDaemon()
+  if (!daemon.ok) return daemon
+
+  return sendDaemon(command)
 }
 
 export async function ensureDaemon(): Promise<Result<number>> {

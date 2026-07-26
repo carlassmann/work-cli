@@ -1,3 +1,9 @@
+import { commandSpecs } from "./commands.js"
+
+const commandList = commandSpecs
+  .map((spec) => `  ${spec.name.padEnd(11)}  ${spec.summary}`)
+  .join("\n")
+
 const sections = {
   root: `work
 
@@ -7,27 +13,7 @@ Usage:
   work <command> [options]
 
 Commands:
-  init       Create work.config.js.
-  create     Create a git worktree.
-  up         Start workspace commands.
-  setup      Run the workspace setup hook.
-  down       Stop workspace commands.
-  run        Start one configured command.
-  restart    Restart commands.
-  ps         List tracked commands.
-  status     Alias for ps.
-  watch      Live-refresh the ps table.
-  logs       Print or follow command logs.
-  urls       List workspace URLs.
-  stop       Stop a tracked command.
-  doctor     Check project setup.
-  prune      Remove dead process records.
-  daemon     Manage workd.
-  help       Show command help.
-  docs       Show built-in reference docs.
-  completions  Print shell completion script.
-  shell-init   Print shell init (completion + cd wrapper).
-  cd         Print workspace root for shell cd.
+${commandList}
 
 The workspace is implied from the current git branch. Pass it explicitly
 as a positional to up/setup/down/urls/cd/run/restart/logs/stop,
@@ -277,7 +263,7 @@ Usage:
   work status -a
 
 Output:
-  status    project/workspace    command    runner    handle    url
+  status    project/workspace    command    pid    url
 
 Empty state:
   no tracked commands`,

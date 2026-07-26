@@ -1,13 +1,13 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { commandNames, commandSpecs } from "./commands.js"
 import { loadConfig } from "./config.js"
+import { docsTopics } from "./docs.js"
 import { gitMainWorktree, gitRoot } from "./git.js"
 import { errResult, ok } from "./result.js"
 import { listWorkspaceStates } from "./state.js"
 import type { Result } from "./result.js"
 
-const commands = ["init", "create", "up", "setup", "down", "run", "restart", "ps", "status", "watch", "logs", "urls", "stop", "doctor", "prune", "daemon", "help", "docs", "completions", "shell-init", "cd"]
-const docsTopics = ["overview", "config", "setup", "git", "daemon", "workspaces", "urls", "portless", "commands"]
 const daemonActions = ["start", "stop", "status"]
 const shells = ["bash", "zsh"]
 
@@ -55,7 +55,7 @@ async function fetchKind(kind: Kind): Promise<Array<string>> {
     case "commands":
       return await listRunnableCommands()
     case "help-topics":
-      return [...commands, ...docsTopics]
+      return [...commandNames, ...docsTopics]
     case "docs-topics":
       return docsTopics
     case "daemon-actions":
@@ -160,32 +160,26 @@ const bashWrapper = `work() {
 }
 `
 
+const zshSubcommands = commandSpecs
+  .map((spec) => `    '${spec.name}:${spec.summary.replace(/\.$/, "")}'`)
+  .join("\n")
+
+const zshFlagCases = commandSpecs
+  .filter((spec) => spec.flags.length > 0)
+  .map((spec) => `    ${spec.name}) flags=(${spec.flags.join(" ")}) ;;`)
+  .join("\n")
+
+const bashFlagCases = commandSpecs
+  .filter((spec) => spec.flags.length > 0)
+  .map((spec) => `    ${spec.name}) echo "${spec.flags.join(" ")} -h --help" ;;`)
+  .join("\n")
+
 const zshScript = `#compdef work
 
 _work() {
   local -a subcommands
   subcommands=(
-    'init:Create work.config.js'
-    'create:Create git worktree'
-    'up:Start workspace commands'
-    'setup:Run workspace setup hook'
-    'down:Stop workspace commands'
-    'run:Start one configured command'
-    'restart:Restart commands'
-    'ps:List tracked commands'
-    'status:Alias for ps'
-    'watch:Live-refresh the ps table'
-    'logs:Print or follow command logs'
-    'urls:List workspace URLs'
-    'stop:Stop a tracked command'
-    'doctor:Check project setup'
-    'prune:Remove dead process records'
-    'daemon:Manage workd'
-    'help:Show command help'
-    'docs:Show built-in reference docs'
-    'completions:Print shell completion script'
-    'shell-init:Print shell init script'
-    'cd:Print workspace root for shell cd'
+${zshSubcommands}
   )
 
   if (( CURRENT == 2 )); then
@@ -286,16 +280,7 @@ _work_emit() {
 _work_emit_flags() {
   local -a flags
   case "$1" in
-    create) flags=(--remote) ;;
-    up) flags=(--create --no-create --remote) ;;
-    down) flags=(-a --all -p --project) ;;
-    run) flags=(-w --workspace) ;;
-    restart) flags=(-a --all -p --project -w --workspace) ;;
-    ps|status) flags=(-a --all) ;;
-    watch) flags=(-a --all -n --interval) ;;
-    logs) flags=(-f --follow -p --project -w --workspace) ;;
-    urls) flags=(-p --project) ;;
-    stop) flags=(-p --project -w --workspace) ;;
+${zshFlagCases}
     *) flags=() ;;
   esac
   flags+=(-h --help)
@@ -406,7 +391,7 @@ const bashScript = `_work() {
     if [[ "$cur" == -* ]]; then
       COMPREPLY=( $(compgen -W "-h --help -v --version" -- "$cur") )
     else
-      COMPREPLY=( $(compgen -W "init create up setup down run restart ps status watch logs urls stop doctor prune daemon help docs completions shell-init cd" -- "$cur") )
+      COMPREPLY=( $(compgen -W "${commandNames.join(" ")}" -- "$cur") )
     fi
     return
   fi
@@ -508,16 +493,7 @@ complete -F _work work
 
 _work_flags() {
   case "$1" in
-    create) echo "--remote -h --help" ;;
-    up) echo "--create --no-create --remote -h --help" ;;
-    down) echo "-a --all -p --project -h --help" ;;
-    run) echo "-w --workspace -h --help" ;;
-    restart) echo "-a --all -p --project -w --workspace -h --help" ;;
-    ps|status) echo "-a --all -h --help" ;;
-    watch) echo "-a --all -n --interval -h --help" ;;
-    logs) echo "-f --follow -p --project -w --workspace -h --help" ;;
-    urls) echo "-p --project -h --help" ;;
-    stop) echo "-p --project -w --workspace -h --help" ;;
+${bashFlagCases}
     *) echo "-h --help" ;;
   esac
 }

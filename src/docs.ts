@@ -322,7 +322,7 @@ Config:
 
 type DocsTopic = keyof typeof docs
 
-const docsTopics = Object.keys(docs) as Array<DocsTopic>
+export const docsTopics = Object.keys(docs) as Array<DocsTopic>
 
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"

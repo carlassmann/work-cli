@@ -3,24 +3,25 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import readline from "node:readline/promises"
 import { spawn } from "node:child_process"
+import { createRequire } from "node:module"
 import { stdin as input, stdout as output } from "node:process"
+import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
-import { commandRuntimeStatus, stopCommand as stopTrackedCommand } from "./processes.js"
+import { commandRuntimeStatus } from "./processes.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
-import { docsText } from "./docs.js"
+import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
 import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
 import { commandExists, existsAt } from "./shell.js"
-import { daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
+import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import type { Result } from "./result.js"
+import type { CommandName } from "./commands.js"
 import type { DevConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
-
-const VERSION = "0.1.0"
 
 type WorkspaceResolution = WorkspaceRecord & {
   created: boolean
@@ -57,7 +58,8 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (args[0] === "--version" || args[0] === "-v") {
-    console.log(`work ${VERSION}`)
+    const { version } = createRequire(import.meta.url)("../package.json") as { version: string }
+    console.log(`work ${version}`)
     return ok(undefined)
   }
 
@@ -80,7 +82,7 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
         return ok(undefined)
       }
 
-      return errResult("CLIError", `${withSuggestion(`unknown help topic: ${topic}`, topic, [...commandNames(), ...docsTopics()])} Run 'work --help'.`)
+      return errResult("CLIError", `${withSuggestion(`unknown help topic: ${topic}`, topic, [...commandNames, ...docsTopics])} Run 'work --help'.`)
     }
 
     console.log(help)
@@ -97,7 +99,7 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   if (hasHelpFlag(rest)) {
     if (!helpSection(name)) {
-      return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, commandNames())} Run 'work --help'.`)
+      return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, [...commandNames])} Run 'work --help'.`)
     }
 
     console.log(commandHelp(name))
@@ -107,32 +109,45 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
   return dispatch(name, rest)
 }
 
-async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Result<void>> {
-  switch (name) {
-    case "init":         return runInit(args)
-    case "create":       return runCreate(args)
-    case "up":           return runUp(args)
-    case "setup":        return runSetup(args)
-    case "down":         return runDown(args)
-    case "run":          return runRun(args)
-    case "restart":      return runRestart(args)
-    case "ps":           return runPs(args)
-    case "status":       return runPs(args)
-    case "watch":        return runWatch(args)
-    case "logs":         return runLogs(args)
-    case "urls":         return runUrls(args)
-    case "stop":         return runStop(args)
-    case "doctor":       return runDoctor(args)
-    case "prune":        return runPrune(args)
-    case "daemon":       return runDaemon(args)
-    case "docs":         return runDocs(args)
-    case "completions":  return runCompletions(args)
-    case "shell-init":   return runShellInit(args)
-    case "cd":           return runCd(args)
-    case "_complete":    return runComplete(args)
-    default:
-      return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, commandNames())} Run 'work --help'.`)
+type CommandHandler = (args: ReadonlyArray<string>) => Promise<Result<void>>
+
+function commandHandlers(): Record<Exclude<CommandName, "help">, CommandHandler> {
+  return {
+    init: runInit,
+    create: runCreate,
+    up: runUp,
+    setup: runSetup,
+    down: runDown,
+    run: runRun,
+    restart: runRestart,
+    ps: runPs,
+    status: runPs,
+    watch: runWatch,
+    logs: runLogs,
+    urls: runUrls,
+    stop: runStop,
+    doctor: runDoctor,
+    prune: runPrune,
+    daemon: runDaemon,
+    docs: runDocs,
+    completions: runCompletions,
+    "shell-init": runShellInit,
+    cd: runCd,
   }
+}
+
+async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Result<void>> {
+  if (name === "_complete") {
+    return runComplete(args)
+  }
+
+  const handler = (commandHandlers() as Record<string, CommandHandler>)[name]
+
+  if (!handler) {
+    return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, [...commandNames])} Run 'work --help'.`)
+  }
+
+  return handler(args)
 }
 
 function hasHelpFlag(args: ReadonlyArray<string>) {
@@ -230,19 +245,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
     return ok(undefined)
   }
 
-  const portless = await ensurePortless(Object.fromEntries(commands))
-  if (!portless.ok) return portless
-
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  for (const [id] of commands) {
-    const response = await sendDaemon({ type: "run", config: ctx.value.config, workspace: workspace.value, command: id })
-    if (!response.ok) return response
-    printProcessStart(id, response.value.data)
-  }
-
-  return ok(undefined)
+  return startConfigured(ctx.value, workspace.value, commands, "run")
 }
 
 async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -298,13 +301,10 @@ async function downStates(states: Array<Pick<WorkspaceState, "project" | "worksp
     return ok(undefined)
   }
 
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
   let count = 0
 
   for (const state of states) {
-    const response = await sendDaemon({ type: "down", project: state.project, workspace: state.workspace })
+    const response = await callDaemon({ type: "down", project: state.project, workspace: state.workspace })
     if (!response.ok) return response
 
     for (const id of response.value.data) {
@@ -342,17 +342,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  const portless = await ensurePortless({ [command]: commandConfig })
-  if (!portless.ok) return portless
-
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "run", config: ctx.value.config, workspace: workspace.value, command })
-  if (!response.ok) return response
-
-  printProcessStart(command, response.value.data)
-  return ok(undefined)
+  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run")
 }
 
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -393,7 +383,14 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!workspace.ok) return workspace
 
   if (all) {
-    return restartAll(ctx.value, workspace.value)
+    const autoStart = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
+
+    if (autoStart.length === 0) {
+      console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
+      return ok(undefined)
+    }
+
+    return startConfigured(ctx.value, workspace.value, autoStart, "restart")
   }
 
   if (!target) {
@@ -406,43 +403,24 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, target, Object.keys(ctx.value.config.commands)))
   }
 
-  return restartConfigured(ctx.value, workspace.value, target, commandConfig)
+  return startConfigured(ctx.value, workspace.value, [[target, commandConfig]], "restart")
 }
 
-async function restartAll(ctx: ProjectContext, workspace: WorkspaceResolution): Promise<Result<void>> {
-  const autoStart = Object.entries(ctx.config.commands).filter(([, command]) => command.autoStart)
-
-  if (autoStart.length === 0) {
-    console.log(`no autoStart commands in work.config.js for ${ctx.config.project}`)
-    return ok(undefined)
-  }
-
-  const portless = await ensurePortless(Object.fromEntries(autoStart))
+async function startConfigured(
+  ctx: ProjectContext,
+  workspace: WorkspaceRecord,
+  entries: Array<[string, DevConfig["commands"][string]]>,
+  type: "run" | "restart",
+): Promise<Result<void>> {
+  const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
 
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  for (const [id] of autoStart) {
-    const response = await sendDaemon({ type: "restart", config: ctx.config, workspace, command: id })
+  for (const [id] of entries) {
+    const response = await callDaemon({ type, config: ctx.config, workspace, command: id })
     if (!response.ok) return response
-    printProcessStart(id, response.value.data, "restarted")
+    printProcessStart(id, response.value.data, type === "restart" ? "restarted" : undefined)
   }
 
-  return ok(undefined)
-}
-
-async function restartConfigured(ctx: ProjectContext, workspace: WorkspaceResolution, id: string, commandConfig: DevConfig["commands"][string]): Promise<Result<void>> {
-  const portless = await ensurePortless({ [id]: commandConfig })
-  if (!portless.ok) return portless
-
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "restart", config: ctx.config, workspace, command: id })
-  if (!response.ok) return response
-
-  printProcessStart(id, response.value.data, "restarted")
   return ok(undefined)
 }
 
@@ -465,10 +443,7 @@ async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Resu
 }
 
 async function restartTracked(target: { project: string; workspace: string; command: string }): Promise<Result<void>> {
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "restartTracked", ...target })
+  const response = await callDaemon({ type: "restartTracked", ...target })
   if (!response.ok) return response
 
   printProcessStart(`${target.project}/${target.workspace}/${target.command}`, response.value.data, "restarted")
@@ -690,21 +665,10 @@ async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   const wsCmd = await parseWorkspaceAndCommand(args, "stop")
   if (!wsCmd.ok) return wsCmd
 
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command })
+  const response = await callDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command })
   if (!response.ok) return response
 
-  if (response.value.data) {
-    console.log(`stopped ${wsCmd.value.project}/${wsCmd.value.workspace}/${wsCmd.value.command}`)
-    return ok(undefined)
-  }
-
-  const localStop = await stopTrackedCommand(wsCmd.value.project, wsCmd.value.workspace, wsCmd.value.command)
-  if (!localStop.ok) return localStop
-
-  if (!localStop.value) {
+  if (!response.value.data) {
     return errResult("CLIError", withSuggestion(`no tracked command: ${wsCmd.value.workspace}/${wsCmd.value.command}`, wsCmd.value.command, await commandCandidates(wsCmd.value.project, wsCmd.value.workspace)))
   }
 
@@ -759,10 +723,7 @@ async function runPrune(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
   }
 
-  const daemon = await ensureDaemon()
-  if (!daemon.ok) return daemon
-
-  const response = await sendDaemon({ type: "prune" })
+  const response = await callDaemon({ type: "prune" })
   if (!response.ok) return response
 
   const count = response.value.data
@@ -1079,36 +1040,6 @@ function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: Wor
 
 function printProcessStart(command: string, result: StartResult, verb = result.started ? "started" : "already up") {
   console.log(`${verb} ${command} pid=${result.record.pid}${result.record.url ? ` ${result.record.url}` : ""}`)
-}
-
-function commandNames() {
-  return [
-    "init",
-    "create",
-    "up",
-    "setup",
-    "down",
-    "run",
-    "restart",
-    "ps",
-    "status",
-    "watch",
-    "logs",
-    "urls",
-    "stop",
-    "doctor",
-    "prune",
-    "daemon",
-    "help",
-    "docs",
-    "completions",
-    "shell-init",
-    "cd",
-  ]
-}
-
-function docsTopics() {
-  return ["overview", "config", "setup", "git", "daemon", "workspaces", "urls", "portless", "commands"]
 }
 
 function unexpectedPositional(positional: ReadonlyArray<string>, count: number): Result<never> | null {

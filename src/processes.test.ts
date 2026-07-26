@@ -35,7 +35,7 @@ describe("process lifecycle", () => {
 
     const afterStart = await readWorkspaceState("tilly", "feature-x")
     assert.equal(afterStart.ok, true)
-    if (afterStart.ok) assert.equal(afterStart.value?.commands["web"]?.runner, "process")
+    if (afterStart.ok) assert.equal(afterStart.value?.commands["web"]?.pid, started.value.record.pid)
 
     const stop = await stopCommand("tilly", "feature-x", "web")
     assert.equal(stop.ok, true)
@@ -80,8 +80,8 @@ describe("process lifecycle", () => {
     assert.equal(stateY.ok, true)
     if (!stateX.ok || !stateY.ok) return
 
-    assert.equal(stateX.value?.commands["web"]?.runner, "process")
-    assert.equal(stateY.value?.commands["web"]?.runner, "process")
+    assert.equal(stateX.value?.commands["web"]?.pid, startedX.value.record.pid)
+    assert.equal(stateY.value?.commands["web"]?.pid, startedY.value.record.pid)
 
     await stopCommand("tilly", "feature-x", "web")
     await stopCommand("tilly", "feature-y", "web")
@@ -134,9 +134,10 @@ describe("process lifecycle", () => {
         web: {
           id: "web",
           label: "web",
-          runner: "process",
           pid: 99999999,
           command: "already gone",
+          run: "already gone",
+          route: null,
           cwd: root,
           log: path.join(root, "web.log"),
           url: null,

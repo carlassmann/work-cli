@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { routeEnvironmentForConfig, spawnCommand, usesPortless, websocketUrl } from "./portless.js"
+import { commandProcess, commandRoute, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
 import type { DevConfig } from "./types.js"
 
 const config: DevConfig = {
@@ -16,7 +16,10 @@ describe("portless", () => {
   })
 
   test("uses routeName override when set", () => {
-    assert.deepEqual(spawnCommand(config, "feature-x", "web", { run: "bun run dev", route: true, routeName: "app" }), {
+    const route = commandRoute(config, "feature-x", "web", { run: "bun run dev", route: true, routeName: "app" })
+
+    assert.equal(route, "app-feature-x-tilly")
+    assert.deepEqual(commandProcess("bun run dev", route), {
       executable: "portless",
       args: ["app-feature-x-tilly", "sh", "-lc", "bun run dev"],
       shell: false,
@@ -25,7 +28,9 @@ describe("portless", () => {
   })
 
   test("wraps routed commands without depending on portless internals", () => {
-    assert.deepEqual(spawnCommand(config, "feature-x", "web", { run: "bun run dev", route: true }), {
+    const route = commandRoute(config, "feature-x", "web", { run: "bun run dev", route: true })
+
+    assert.deepEqual(commandProcess("bun run dev", route), {
       executable: "portless",
       args: ["web-feature-x-tilly", "sh", "-lc", "bun run dev"],
       shell: false,
@@ -34,7 +39,10 @@ describe("portless", () => {
   })
 
   test("leaves unrouted commands as shell commands", () => {
-    assert.deepEqual(spawnCommand(config, "feature-x", "web", { run: "bun run test" }), {
+    const route = commandRoute(config, "feature-x", "web", { run: "bun run test" })
+
+    assert.equal(route, null)
+    assert.deepEqual(commandProcess("bun run test", route), {
       executable: "bun run test",
       args: [],
       shell: true,
