@@ -8,6 +8,7 @@ commands stable local URLs.
 work intentionally sits on top of existing tools:
   git       owns repositories, branches, and worktrees
   portless  owns HTTPS local routing and port allocation
+  cloudflared owns remote routing and public TLS when --cloudflare is used
 
 Core workflow:
   work init my-project
@@ -44,6 +45,9 @@ Example:
       },
     },
   }
+
+Workspace fields:
+  env                 environment inherited by setup and every command
 
 Command fields:
   run                 shell command to start
@@ -247,6 +251,40 @@ Config:
   routeName: "app"         override first URL segment
   portless: false          do not wrap this command`,
 
+  cloudflare: `Cloudflare Tunnel publishes routed commands with public HTTPS.
+
+One-time machine setup:
+  cloudflared tunnel login
+  cloudflared tunnel create work-{machine}
+
+Workspace env in work.config.js:
+  WORK_CLOUDFLARE_DOMAIN     Cloudflare DNS zone, such as syntwin.ai
+  WORK_CLOUDFLARE_TUNNEL_ID  UUID printed by tunnel create
+  WORK_CLOUDFLARE_MACHINE    stable machine label
+
+Recommended machine label:
+  {owner}-{random 64-bit token}-{hostname}
+
+Generate the token once:
+  openssl rand -hex 8
+
+Example:
+  WORK_CLOUDFLARE_MACHINE: "carl-7f3a91c8d2e4b6a8-cbook"
+
+Result:
+  https://carl-7f3a91c8d2e4b6a8-cbook-web-feature-tilly.syntwin.ai
+
+Keep the machine label stable and use a different value per machine. Do not
+publish it in a public repository. The random element makes discovery difficult;
+it does not authenticate users who already know the URL.
+
+Run:
+  work setup --cloudflare
+  work up --cloudflare
+
+Use a single hostname label directly below the Cloudflare zone so Universal SSL
+covers it. In WorkOS, allow https://*.syntwin.ai and the required callback path.`,
+
   commands: `CLI commands:
   work init [project]
     create work.config.js
@@ -254,10 +292,10 @@ Config:
   work create <workspace> [--remote <name>]
     create a git worktree without setup or commands
 
-  work up [workspace] [--create|--no-create] [--remote <name>]
+  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare]
     start autoStart commands for a workspace
 
-  work setup [workspace]
+  work setup [workspace] [--cloudflare]
     run worktrees.setup for a workspace
 
   work down [workspace]

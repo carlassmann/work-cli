@@ -38,6 +38,15 @@ describe("portless", () => {
     })
   })
 
+  test("pins the backend port for Cloudflare Tunnel forwarding", () => {
+    assert.deepEqual(commandProcess("bun run dev", "web-feature-x-tilly", 43123), {
+      executable: "portless",
+      args: ["web-feature-x-tilly", "--app-port", "43123", "sh", "-lc", "bun run dev"],
+      shell: false,
+      display: 'portless web-feature-x-tilly --app-port 43123 sh -lc "bun run dev"',
+    })
+  })
+
   test("leaves unrouted commands as shell commands", () => {
     const route = commandRoute(config, "feature-x", "web", { run: "bun run test" })
 
@@ -78,5 +87,25 @@ describe("portless", () => {
   test("converts http URLs to websocket URLs", () => {
     assert.equal(websocketUrl("http://web.local"), "ws://web.local")
     assert.equal(websocketUrl("https://web.local"), "wss://web.local")
+  })
+
+  test("exports single-label Cloudflare HTTPS and WebSocket URLs", () => {
+    const env = routeEnvironmentForConfig({
+      project: "tilly",
+      commands: {
+        web: { run: "bun run dev", route: true },
+        sync: { run: "bun run sync", route: true },
+      },
+    }, "feature-x", {
+      mode: "cloudflare",
+      machine: "cbook",
+      domain: "dev.example.com",
+      tunnelId: "11111111-1111-4111-8111-111111111111",
+      credentialsFile: "/tmp/tunnel.json",
+    })
+
+    assert.equal(env.WORK_URL, "https://cbook-web-feature-x-tilly.dev.example.com")
+    assert.equal(env.WORK_SYNC_URL, "https://cbook-sync-feature-x-tilly.dev.example.com")
+    assert.equal(env.WORK_SYNC_WS_URL, "wss://cbook-sync-feature-x-tilly.dev.example.com")
   })
 })

@@ -26,3 +26,12 @@ export function routeName(project: string, workspace: string, command: string, o
 export function routeUrl(project: string, workspace: string, command: string, override?: string) {
   return `https://${routeName(project, workspace, command, override)}.localhost`
 }
+
+export function exposureLabel(machine: string, route: string) {
+  const label = slugify(`${machine}-${route}`)
+  if (label.length <= 63) return label
+
+  const hash = crypto.createHash("sha256").update(label).digest("hex").slice(0, 8)
+  return `${label.slice(0, 54).replace(/-+$/, "")}-${hash}`
+}
+import crypto from "node:crypto"

@@ -84,7 +84,7 @@ Examples:
 Start all autoStart commands for a workspace.
 
 Usage:
-  work up [workspace] [--create|--no-create] [--remote <name>]
+  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -93,6 +93,7 @@ Options:
   --create           Create a missing git worktree without asking.
   --no-create        Fail if the workspace worktree does not exist.
   --remote <name>    Fetch the branch from this remote and track it when creating.
+  --cloudflare       Publish routed commands through Cloudflare Tunnel.
 
 Behavior:
   work up                      Use current worktree.
@@ -113,10 +114,13 @@ Examples:
 Run worktrees.setup for a workspace.
 
 Usage:
-  work setup [workspace]
+  work setup [workspace] [--cloudflare]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
+
+Options:
+  --cloudflare    Use stable Cloudflare URLs in setup environment.
 
 Environment:
   WORK_PROJECT       Project slug.
@@ -178,9 +182,9 @@ Examples:
 Stop and start one configured command, or autoStart commands with --all.
 
 Usage:
-  work restart [workspace] <command>
-  work restart [-p project] [-w workspace] <command>
-  work restart [-p project] [-w workspace] --all
+  work restart [workspace] <command> [--cloudflare]
+  work restart [-p project] [-w workspace] <command> [--cloudflare]
+  work restart [-p project] [-w workspace] --all [--cloudflare]
 
 Arguments:
   command      Configured command id.
@@ -190,6 +194,7 @@ Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
   -a, --all                 Inside a project: restart autoStart commands for the workspace.
                             Outside a project: restart matching tracked commands.
+  --cloudflare              Publish routed commands through Cloudflare Tunnel.
 
 Examples:
   work restart web
@@ -203,14 +208,15 @@ Examples:
 Start one configured command.
 
 Usage:
-  work run [workspace] <command>
-  work run [-w workspace] <command>
+  work run [workspace] <command> [--cloudflare]
+  work run [-w workspace] <command> [--cloudflare]
 
 Arguments:
   command      Configured command id.
 
 Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
+  --cloudflare              Publish the routed command through Cloudflare Tunnel.
 
 Behavior:
   If the command is already alive, work prints "already up".
@@ -326,6 +332,7 @@ Checks:
   work.config.js
   worktrees.setup
   whether portless is installed when routed commands need it
+  Cloudflare Tunnel configuration when environment variables are set
   command start mode and route mode`,
 
   prune: `work prune

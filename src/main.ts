@@ -5,6 +5,7 @@ import readline from "node:readline/promises"
 import { spawn } from "node:child_process"
 import { createRequire } from "node:module"
 import { stdin as input, stdout as output } from "node:process"
+import { cloudflareExposure } from "./cloudflare.js"
 import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
@@ -16,12 +17,13 @@ import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
 import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
+import { childEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import type { Result } from "./result.js"
 import type { CommandName } from "./commands.js"
-import type { DevConfig, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 type WorkspaceResolution = WorkspaceRecord & {
   created: boolean
@@ -209,7 +211,7 @@ async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { create: booleanFlag(), "no-create": booleanFlag(), remote: valueFlag() },
+    flags: { create: booleanFlag(), "no-create": booleanFlag(), remote: valueFlag(), cloudflare: booleanFlag() },
   })
   if (!parsed.ok) return parsed
 
@@ -233,10 +235,12 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!workspace.ok) return workspace
 
   const commands = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
+  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  if (!exposure.ok) return exposure
 
   if (workspace.value.created) {
     console.log(`created ${workspace.value.workspace} from ${workspace.value.createdFrom}`)
-    const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value)
+    const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value)
     if (!setup.ok) return setup
   }
 
@@ -245,11 +249,11 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
     return ok(undefined)
   }
 
-  return startConfigured(ctx.value, workspace.value, commands, "run")
+  return startConfigured(ctx.value, workspace.value, commands, "run", exposure.value)
 }
 
 async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, { flags: { cloudflare: booleanFlag() } })
   if (!parsed.ok) return parsed
 
   const workspaceName = parsed.value.positional[0]
@@ -261,7 +265,10 @@ async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  return runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value)
+  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  if (!exposure.ok) return exposure
+
+  return runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value)
 }
 
 async function runDown(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -321,7 +328,7 @@ async function downStates(states: Array<Pick<WorkspaceState, "project" | "worksp
 }
 
 async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w") } })
+  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), cloudflare: booleanFlag() } })
   if (!parsed.ok) return parsed
 
   const parsedTarget = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
@@ -342,12 +349,15 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run")
+  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  if (!exposure.ok) return exposure
+
+  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value)
 }
 
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w") },
+    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w"), cloudflare: booleanFlag() },
   })
   if (!parsed.ok) return parsed
 
@@ -381,6 +391,8 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const workspace = await resolveWorkspace(ctx.value, workspaceArg, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
+  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  if (!exposure.ok) return exposure
 
   if (all) {
     const autoStart = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
@@ -390,7 +402,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
       return ok(undefined)
     }
 
-    return startConfigured(ctx.value, workspace.value, autoStart, "restart")
+    return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value)
   }
 
   if (!target) {
@@ -403,7 +415,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, target, Object.keys(ctx.value.config.commands)))
   }
 
-  return startConfigured(ctx.value, workspace.value, [[target, commandConfig]], "restart")
+  return startConfigured(ctx.value, workspace.value, [[target, commandConfig]], "restart", exposure.value)
 }
 
 async function startConfigured(
@@ -411,12 +423,12 @@ async function startConfigured(
   workspace: WorkspaceRecord,
   entries: Array<[string, DevConfig["commands"][string]]>,
   type: "run" | "restart",
+  exposure: Exposure = { mode: "local" },
 ): Promise<Result<void>> {
   const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
-
   for (const [id] of entries) {
-    const response = await callDaemon({ type, config: ctx.config, workspace, command: id })
+    const response = await callDaemon({ type, config: ctx.config, workspace, command: id, exposure })
     if (!response.ok) return response
     printProcessStart(id, response.value.data, type === "restart" ? "restarted" : undefined)
   }
@@ -701,6 +713,22 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const needsPortless = config?.ok ? Object.values(config.value.commands).some(usesPortless) : false
   console.log(`portless\t${needsPortless ? await commandExists("portless") ? "ok" : "missing" : "not needed"}`)
+
+  const cloudflareConfigured = Boolean(config?.ok && (config.value.env?.["WORK_CLOUDFLARE_DOMAIN"] || config.value.env?.["WORK_CLOUDFLARE_TUNNEL_ID"]))
+  if (!cloudflareConfigured) {
+    console.log("cloudflare\tnot configured")
+  } else {
+    const exposure = cloudflareExposure(config?.ok ? config.value.env : {})
+    if (!exposure.ok) {
+      console.log(`cloudflare\tinvalid\t${exposure.error.message}`)
+    } else if (!await commandExists("cloudflared")) {
+      console.log("cloudflare\tmissing\tcloudflared is not installed")
+    } else if (exposure.value.mode === "cloudflare" && !await existsAt(exposure.value.credentialsFile)) {
+      console.log(`cloudflare\tmissing\t${exposure.value.credentialsFile}`)
+    } else {
+      console.log(`cloudflare\tok\t${exposure.value.mode === "cloudflare" ? exposure.value.domain : ""}`)
+    }
+  }
 
   const status = await daemonStatus()
   console.log(`workd\t${status.running ? `ok\tpid=${status.pid}` : "stopped"}`)
@@ -988,7 +1016,7 @@ function forwardSignals(child: import("node:child_process").ChildProcess): () =>
   }
 }
 
-async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspace: WorkspaceResolution): Promise<Result<void>> {
+async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspace: WorkspaceResolution, exposure: Exposure = { mode: "local" }): Promise<Result<void>> {
   const setup = config.worktrees?.setup
 
   if (!setup) {
@@ -1003,8 +1031,8 @@ async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspac
       shell: true,
       stdio: "inherit",
       env: {
-        ...process.env,
-        ...workspaceSetupEnv(config, sourceRoot, workspace),
+        ...childEnvironment({ ...process.env, ...config.env }),
+        ...workspaceSetupEnv(config, sourceRoot, workspace, exposure),
       },
     })
 
@@ -1027,15 +1055,19 @@ async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspac
   })
 }
 
-function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: WorkspaceRecord) {
+function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: WorkspaceRecord, exposure: Exposure) {
   return {
     WORK_PROJECT: config.project,
     WORK_WORKSPACE: workspace.workspace,
     WORK_ROOT: workspace.root,
     WORK_SOURCE_ROOT: sourceRoot,
     WORK_BRANCH: workspace.branch ?? "",
-    ...routeEnvironmentForConfig(config, workspace.workspace),
+    ...routeEnvironmentForConfig(config, workspace.workspace, exposure),
   }
+}
+
+function resolveExposure(config: DevConfig, cloudflare: boolean | undefined): Result<Exposure> {
+  return cloudflare ? cloudflareExposure(config.env) : ok({ mode: "local" })
 }
 
 function printProcessStart(command: string, result: StartResult, verb = result.started ? "started" : "already up") {

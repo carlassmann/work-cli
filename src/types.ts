@@ -15,6 +15,7 @@ export type CommandConfig = {
 
 export type DevConfig = {
   project: string
+  env?: Record<string, string>
   worktrees?: {
     dir?: string
     setup?: string
@@ -29,6 +30,16 @@ export type WorkspaceRecord = {
   root: string
 }
 
+export type Exposure =
+  | { mode: "local" }
+  | {
+      mode: "cloudflare"
+      machine: string
+      domain: string
+      tunnelId: string
+      credentialsFile: string
+    }
+
 export type CommandRecord = {
   id: string
   label: string
@@ -38,15 +49,21 @@ export type CommandRecord = {
   cwd: string
   log: string
   url: string | null
+  localUrl?: string | null
+  exposure?: Exposure
+  backendPort?: number
   startedAt: string
   pid: number
 }
 
 export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>
+  env?: Record<string, string>
+  exposure?: Exposure
+  urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 3
+export const DAEMON_PROTOCOL_VERSION = 5
 
 export type DaemonCommand =
   | {
@@ -54,6 +71,7 @@ export type DaemonCommand =
       config: DevConfig
       workspace: WorkspaceRecord
       command: string
+      exposure: Exposure
     }
   | {
       type: "down"
@@ -71,6 +89,7 @@ export type DaemonCommand =
       config: DevConfig
       workspace: WorkspaceRecord
       command: string
+      exposure: Exposure
     }
   | {
       type: "restartTracked"

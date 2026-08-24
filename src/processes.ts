@@ -2,14 +2,16 @@ import fs from "node:fs"
 import fsp from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
+import { reserveBackendPort, syncCloudflareTunnel } from "./cloudflare.js"
+import { childEnvironment } from "./environment.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
-import { commandProcess, commandRoute, portlessUrl, routeEnvironment, routeEnvironmentForConfig } from "./portless.js"
+import { commandProcess, commandRoute, portlessUrl, publicUrl, routeEnvironment, routeEnvironmentForConfig, routeUrlsForConfig } from "./portless.js"
 import { isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
-import type { CommandRecord, DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { CommandRecord, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
 
-export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string): Promise<Result<{ record: CommandRecord; started: boolean }>> {
+export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string, exposure: Exposure = { mode: "local" }): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const command = config.commands[id]
 
   if (!command) {
@@ -23,22 +25,41 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
   if (!stateResult.ok) return stateResult
   const state = stateResult.value
   const existing = state?.commands[id]
+  const stateMode = state?.exposure?.mode ?? "local"
+  const hasLiveCommand = Object.values(state?.commands ?? {}).some((record) => isPidRunning(record.pid))
 
-  if (existing && isPidRunning(existing.pid)) {
+  if (hasLiveCommand && stateMode !== exposure.mode) {
+    return errResult("ProcessError", `workspace ${workspace.workspace} is already running in ${stateMode} mode. Run work down ${workspace.workspace} before switching.`)
+  }
+
+  if (existing && isPidRunning(existing.pid) && (existing.exposure?.mode ?? "local") === exposure.mode) {
     return ok({ record: existing, started: false })
   }
 
+  if (existing) {
+    const stopped = await stopTrackedProcess(existing)
+    if (!stopped.ok) return stopped
+  }
+
   const route = commandRoute(config, workspace.workspace, id, command)
-  const commandExec = commandProcess(command.run, route)
+  if (exposure.mode === "cloudflare" && command.route === true && !route) {
+    return errResult("ProcessError", `command ${id} must use Portless to publish through Cloudflare Tunnel`)
+  }
+
+  const published = exposure.mode === "cloudflare" && Boolean(route)
+  const backendPortResult = published ? await reserveBackendPort() : ok<number | undefined>(undefined)
+  if (!backendPortResult.ok) return backendPortResult
+  const backendPort = backendPortResult.value
+  const commandExec = commandProcess(command.run, route, backendPort)
   const pid = await spawnLogged(id, commandExec, {
     cwd,
     log,
     env: {
-      ...process.env,
+      ...childEnvironment({ ...process.env, ...config.env }),
       WORK_PROJECT: config.project,
       WORK_WORKSPACE: workspace.workspace,
       WORK_COMMAND: id,
-      ...routeEnvironmentForConfig(config, workspace.workspace),
+      ...routeEnvironmentForConfig(config, workspace.workspace, exposure),
       ...command.env,
     },
   })
@@ -53,19 +74,37 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
     route,
     cwd,
     log,
-    url: portlessUrl(config, workspace.workspace, id, command),
+    url: publicUrl(config, workspace.workspace, id, command, exposure),
+    localUrl: portlessUrl(config, workspace.workspace, id, command),
+    exposure,
+    ...(backendPort ? { backendPort } : {}),
     startedAt: new Date().toISOString(),
   }
 
   const nextState: WorkspaceState = state ?? freshState(workspace)
   nextState.root = workspace.root
   nextState.branch = workspace.branch
+  if (config.env) nextState.env = childEnvironment(config.env)
+  else delete nextState.env
+  nextState.exposure = exposure
+  nextState.urls = routeUrlsForConfig(config, workspace.workspace, exposure)
   nextState.commands[id] = record
 
   const write = await writeWorkspaceState(nextState)
   if (!write.ok) {
     await stopProcessTree(pid.value)
     return write
+  }
+
+  if (published) {
+    const synced = await syncCloudflareTunnel()
+    if (!synced.ok) {
+      delete nextState.commands[id]
+      await writeWorkspaceState(nextState)
+      await stopProcessTree(pid.value)
+      await syncCloudflareTunnel()
+      return synced
+    }
   }
 
   return ok({ record, started: true })
@@ -120,13 +159,17 @@ export async function stopCommand(project: string, workspace: string, id: string
     return ok(false)
   }
 
-  if (isPidRunning(command.pid)) {
-    await stopProcessTree(command.pid)
-  }
+  const stopped = await stopTrackedProcess(command)
+  if (!stopped.ok) return stopped
 
   delete state.commands[id]
   const write = await writeWorkspaceState(state)
   if (!write.ok) return write
+
+  if (command.exposure?.mode === "cloudflare") {
+    const synced = await syncCloudflareTunnel()
+    if (!synced.ok) return synced
+  }
 
   return ok(true)
 }
@@ -146,16 +189,15 @@ export async function restartTrackedCommand(project: string, workspace: string, 
     return errResult("ProcessError", `tracked record for ${workspace}/${id} predates this work version. Run: work stop ${id} && work run ${id}`)
   }
 
-  if (isPidRunning(command.pid)) {
-    await stopProcessTree(command.pid)
-  }
+  const stopped = await stopTrackedProcess(command)
+  if (!stopped.ok) return stopped
 
-  const commandExec = commandProcess(command.run, command.route)
+  const commandExec = commandProcess(command.run, command.route, command.backendPort)
   const pid = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
     log: command.log,
     env: {
-      ...process.env,
+      ...childEnvironment({ ...process.env, ...state.env }),
       WORK_PROJECT: project,
       WORK_WORKSPACE: workspace,
       WORK_COMMAND: id,
@@ -178,10 +220,20 @@ export async function restartTrackedCommand(project: string, workspace: string, 
     return write
   }
 
+  if (command.exposure?.mode === "cloudflare") {
+    const synced = await syncCloudflareTunnel()
+    if (!synced.ok) {
+      await stopProcessTree(pid.value)
+      return synced
+    }
+  }
+
   return ok({ record, started: true })
 }
 
 function stateRouteUrls(state: WorkspaceState) {
+  if (state.urls) return state.urls
+
   return Object.fromEntries(
     Object.entries(state.commands)
       .map(([id, command]) => [id, command.url])
@@ -210,6 +262,11 @@ export async function pruneDeadCommands(): Promise<Result<number>> {
     }
   }
 
+  if (pruned > 0) {
+    const synced = await syncCloudflareTunnel()
+    if (!synced.ok) return synced
+  }
+
   return ok(pruned)
 }
 
@@ -219,6 +276,14 @@ export async function commandRuntimeStatus(command: CommandRecord): Promise<"up"
 
 async function commandIsUp(command: CommandRecord) {
   return await commandRuntimeStatus(command) === "up"
+}
+
+async function stopTrackedProcess(command: CommandRecord): Promise<Result<void>> {
+  if (isPidRunning(command.pid)) {
+    await stopProcessTree(command.pid)
+  }
+
+  return ok(undefined)
 }
 
 async function spawnWithLog(
@@ -293,4 +358,3 @@ function sendSignal(pid: number, signal: NodeJS.Signals): boolean {
     }
   }
 }
-

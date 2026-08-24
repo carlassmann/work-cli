@@ -8,9 +8,11 @@ import { tempDir } from "./test-helpers.js"
 import type { DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
+const previousPath = process.env["PATH"]
 
 afterEach(() => {
   process.env["WORK_STATE_ROOT"] = previousStateRoot
+  process.env["PATH"] = previousPath
 })
 
 describe("process lifecycle", () => {
@@ -91,9 +93,13 @@ describe("process lifecycle", () => {
     const root = await tempDir()
     const workspace = testWorkspace(root)
     const output = path.join(root, "env.json")
-    const command = `node -e 'require("fs").writeFileSync(${JSON.stringify(output)}, JSON.stringify({ web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS }))'`
+    const command = `node -e 'require("fs").writeFileSync(${JSON.stringify(output)}, JSON.stringify({ web: process.env.WORK_WEB_URL, sync: process.env.WORK_SYNC_URL, syncWs: process.env.WORK_SYNC_WS_URL, urls: process.env.WORK_URLS, workspaceValue: process.env.WORKSPACE_VALUE, credentials: process.env.WORK_CLOUDFLARE_CREDENTIALS }))'`
     const config: DevConfig = {
       project: "tilly",
+      env: {
+        WORKSPACE_VALUE: "configured",
+        WORK_CLOUDFLARE_CREDENTIALS: "must-not-leak",
+      },
       commands: {
         web: {
           run: command,
@@ -117,11 +123,74 @@ describe("process lifecycle", () => {
       web: "https://web-feature-x-tilly.localhost",
       sync: "https://sync-feature-x-tilly.localhost",
       syncWs: "wss://sync-feature-x-tilly.localhost",
+      workspaceValue: "configured",
       urls: JSON.stringify({
         web: "https://web-feature-x-tilly.localhost",
         sync: "https://sync-feature-x-tilly.localhost",
       }),
     })
+
+    const state = await readWorkspaceState("tilly", "feature-x")
+    assert.deepEqual(state.ok ? state.value?.env : undefined, { WORKSPACE_VALUE: "configured" })
+  })
+
+  test("keeps one Cloudflare connector synchronized with routed processes", async () => {
+    const root = await tempDir()
+    const bin = await tempDir("work-cli-bin-")
+    const trace = path.join(root, "cloudflared.trace")
+    const portless = path.join(bin, "portless")
+    const cloudflared = path.join(bin, "cloudflared")
+    const tunnelId = "11111111-1111-4111-8111-111111111111"
+    const credentialsFile = path.join(root, `${tunnelId}.json`)
+
+    await fs.writeFile(portless, `#!/bin/sh
+while [ "$1" != "sh" ]; do shift; done
+exec "$@"
+`)
+    await fs.writeFile(cloudflared, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(trace)}
+if [ "$2" = "route" ]; then exit 0; fi
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+`)
+    await fs.chmod(portless, 0o755)
+    await fs.chmod(cloudflared, 0o755)
+    await fs.writeFile(credentialsFile, "{}")
+    process.env["PATH"] = `${bin}:${previousPath}`
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+
+    const config: DevConfig = {
+      project: "tilly",
+      commands: {
+        web: {
+          run: "node -e 'setTimeout(() => {}, 30000)'",
+          route: true,
+        },
+      },
+    }
+    const started = await startCommand(config, testWorkspace(root), "web", {
+      mode: "cloudflare",
+      machine: "cbook",
+      domain: "dev.example.com",
+      tunnelId,
+      credentialsFile,
+    })
+
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+    assert.equal(started.value.record.url, "https://cbook-web-feature-x-tilly.dev.example.com")
+    assert.equal(typeof started.value.record.backendPort, "number")
+    const calls = await readSoon(trace)
+    assert.match(calls, new RegExp(`tunnel route dns ${tunnelId} cbook-web-feature-x-tilly\\.dev\\.example\\.com`))
+    assert.match(calls, new RegExp(`tunnel --config .+ run ${tunnelId}`))
+    const tunnelConfig = await fs.readFile(path.join(process.env["WORK_STATE_ROOT"] ?? "", "cloudflare", "config.yml"), "utf8")
+    assert.match(tunnelConfig, /hostname: "cbook-web-feature-x-tilly\.dev\.example\.com"/)
+    assert.match(tunnelConfig, /service: "http:\/\/127\.0\.0\.1:\d+"/)
+
+    const stopped = await stopCommand("tilly", "feature-x", "web")
+    assert.equal(stopped.ok, true)
+    const connectorPid = path.join(process.env["WORK_STATE_ROOT"] ?? "", "cloudflare", "cloudflared.pid")
+    await assert.rejects(fs.stat(connectorPid))
   })
 
   test("prunes dead command records", async () => {

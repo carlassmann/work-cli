@@ -73,6 +73,9 @@ function validateConfig(config: DevConfig): Result<void> {
   const worktrees = validateWorktrees(config)
   if (!worktrees.ok) return worktrees
 
+  const environment = validateEnvironment(config.env, "env")
+  if (!environment.ok) return environment
+
   if (!config.commands || typeof config.commands !== "object" || Array.isArray(config.commands)) {
     return errResult("ConfigError", "commands must be an object")
   }
@@ -121,15 +124,8 @@ function validateCommand(id: string, command: DevConfig["commands"][string]): Re
     return errResult("ConfigError", `command ${id}.cwd must be a string`)
   }
 
-  if (command.env && (typeof command.env !== "object" || Array.isArray(command.env))) {
-    return errResult("ConfigError", `command ${id}.env must be an object`)
-  }
-
-  for (const [key, value] of Object.entries(command.env ?? {})) {
-    if (typeof value !== "string") {
-      return errResult("ConfigError", `command ${id}.env.${key} must be a string`)
-    }
-  }
+  const environment = validateEnvironment(command.env, `command ${id}.env`)
+  if (!environment.ok) return environment
 
   if (command.autoStart !== undefined && typeof command.autoStart !== "boolean") {
     return errResult("ConfigError", `command ${id}.autoStart must be a boolean`)
@@ -167,3 +163,16 @@ function validateCommand(id: string, command: DevConfig["commands"][string]): Re
   return ok(undefined)
 }
 
+function validateEnvironment(environment: Record<string, string> | undefined, field: string): Result<void> {
+  if (environment && (typeof environment !== "object" || Array.isArray(environment))) {
+    return errResult("ConfigError", `${field} must be an object`)
+  }
+
+  for (const [key, value] of Object.entries(environment ?? {})) {
+    if (typeof value !== "string") {
+      return errResult("ConfigError", `${field}.${key} must be a string`)
+    }
+  }
+
+  return ok(undefined)
+}

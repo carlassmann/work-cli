@@ -30,7 +30,7 @@ The individual pieces are already solved:
 
 Zero runtime dependencies — just Node ≥ 20 stdlib. The full CLI ships as one ~30 KB JS file.
 
-[portless]: https://github.com/ccssmnn/portless
+[portless]: https://github.com/vercel-labs/portless
 
 ## What you get
 
@@ -71,6 +71,53 @@ Shell integration (completion + `work cd`) — add to `~/.zshrc` or `~/.bashrc`:
 ```sh
 eval "$(work shell-init zsh)"    # or: bash
 ```
+
+## Remote HTTPS with Cloudflare Tunnel
+
+Opt in per invocation; existing commands and setup scripts stay unchanged:
+
+```sh
+work setup --cloudflare
+work up --cloudflare
+```
+
+Every routed command gets one stable HTTPS label:
+
+```text
+https://{machine}-{command}-{workspace}-{project}.example.com
+```
+
+`WORK_URL`, every `WORK_<ID>_URL`, WebSocket variants, and both JSON maps use these URLs. Normal commands remain on `*.localhost`.
+
+One-time machine setup:
+
+```sh
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create work-cbook
+```
+
+Put the settings in the workspace environment in `work.config.js`:
+
+```js
+export default {
+  env: {
+    WORK_CLOUDFLARE_DOMAIN: "example.com",
+    WORK_CLOUDFLARE_TUNNEL_ID: "<tunnel UUID>",
+    // Recommended: owner + random 64-bit token + hostname
+    WORK_CLOUDFLARE_MACHINE: "carl-7f3a91c8d2e4b6a8-cbook",
+  },
+  // ...
+}
+```
+
+Generate the random token once with `openssl rand -hex 8`, keep the resulting machine value stable, and use a different value per machine. This makes URLs impractical to guess while preserving stable origins. It is obscurity, not authentication: anyone who learns a URL can open it. Do not publish the value in a public repository.
+
+Top-level `env` is inherited by workspace setup and commands. Global Cloudflare variables are ignored. `cloudflared tunnel create` stores credentials in its standard directory; `work` discovers them automatically and never passes them to setup scripts or dev servers.
+
+The domain must use Cloudflare DNS. Keeping the complete work name in one label, directly below the zone, allows standard Universal SSL to cover it. `work` creates each exact DNS CNAME and keeps one machine-wide connector synchronized with active commands. DNS records remain stable after commands stop.
+
+In WorkOS, allow CORS origin `https://*.example.com` and the required non-default redirect wildcard, such as `https://*.example.com/callback`. Published Tunnel hostnames remain internet-reachable; the random label only makes discovery difficult.
 
 ## Example: a real workflow
 

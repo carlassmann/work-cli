@@ -66,6 +66,19 @@ describe("config", () => {
     if (loaded.ok) assert.equal(loaded.value.commands.web?.route, false)
   })
 
+  test("rejects non-string workspace env", async () => {
+    const root = await tempDir()
+    await writeConfig(root, `export default {
+      project: "tilly",
+      env: { PORT: 3000 },
+      commands: { web: { run: "bun run dev" } },
+    }`)
+
+    const loaded = await loadConfig(root)
+    assert.equal(loaded.ok, false)
+    if (!loaded.ok) assert.match(loaded.error.message, /env\.PORT must be a string/)
+  })
+
   test("missing config returns ConfigError", async () => {
     const root = await tempDir()
     const loaded = await loadConfig(root)

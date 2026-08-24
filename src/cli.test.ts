@@ -638,6 +638,43 @@ describe("cli", () => {
       sync: "wss://sync-feature-x-tilly.localhost",
     })
   })
+
+  test("setup --cloudflare exports stable Cloudflare URLs", async () => {
+    const root = await tempDir()
+    const setupFile = path.join(root, "setup-env.json")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      env: {
+        WORK_CLOUDFLARE_DOMAIN: "dev.example.com",
+        WORK_CLOUDFLARE_MACHINE: "cbook",
+        WORK_CLOUDFLARE_TUNNEL_ID: "11111111-1111-4111-8111-111111111111",
+        WORK_CLOUDFLARE_CREDENTIALS: "~/.cloudflared/test.json",
+      },
+      worktrees: {
+        setup: ${JSON.stringify(`node -e 'require("fs").writeFileSync(${JSON.stringify(setupFile)}, JSON.stringify({ web: process.env.WORK_WEB_URL, webWs: process.env.WORK_WEB_WS_URL, urls: process.env.WORK_URLS, credentials: process.env.WORK_CLOUDFLARE_CREDENTIALS, apiToken: process.env.CLOUDFLARE_API_TOKEN }))'`)},
+      },
+      commands: {
+        web: { run: "echo web", route: true },
+      },
+    }`)
+
+    const result = await runCli(["setup", "--cloudflare"], {
+      cwd: root,
+      env: {
+        CLOUDFLARE_API_TOKEN: "must-not-leak",
+      },
+    })
+
+    assert.equal(result.stderr, "")
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(JSON.parse(await fs.readFile(setupFile, "utf8")), {
+      web: "https://cbook-web-main-tilly.dev.example.com",
+      webWs: "wss://cbook-web-main-tilly.dev.example.com",
+      urls: JSON.stringify({ web: "https://cbook-web-main-tilly.dev.example.com" }),
+    })
+  })
 })
 
 async function cloneWithRemoteBranch(branch: string) {

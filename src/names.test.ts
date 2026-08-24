@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { routeName, routeUrl, slugify, validateSlug } from "./names.js"
+import { exposureLabel, routeName, routeUrl, slugify, validateSlug } from "./names.js"
 
 describe("names", () => {
   test("slugifies branch names for workspace aliases", () => {
@@ -16,6 +16,15 @@ describe("names", () => {
   test("derives canonical route urls", () => {
     assert.equal(routeUrl("tilly", "feature-x", "web"), "https://web-feature-x-tilly.localhost")
     assert.equal(routeUrl("tilly", "feature-x", "web", "app"), "https://app-feature-x-tilly.localhost")
+  })
+
+  test("keeps exposure labels DNS-safe and stable within 63 characters", () => {
+    assert.equal(exposureLabel("cbook", "web-feature-x-tilly"), "cbook-web-feature-x-tilly")
+
+    const label = exposureLabel("cbook", `web-${"feature-".repeat(12)}tilly`)
+    assert.equal(label.length, 63)
+    assert.match(label, /^cbook-web-feature-.+-[a-f0-9]{8}$/)
+    assert.equal(label, exposureLabel("cbook", `web-${"feature-".repeat(12)}tilly`))
   })
 })
 

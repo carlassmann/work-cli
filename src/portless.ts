@@ -1,8 +1,9 @@
 import { commandExists } from "./shell.js"
+import { cloudflareHostname } from "./cloudflare.js"
 import { routeName, routeUrl } from "./names.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
-import type { CommandConfig, DevConfig } from "./types.js"
+import type { CommandConfig, DevConfig, Exposure } from "./types.js"
 
 export function usesPortless(command: CommandConfig) {
   return command.portless !== false && command.route === true
@@ -16,10 +17,18 @@ export function portlessUrl(config: DevConfig, workspace: string, id: string, co
   return routeUrl(config.project, workspace, id, command.routeName)
 }
 
-function routeUrls(config: DevConfig, workspace: string) {
+export function publicUrl(config: DevConfig, workspace: string, id: string, command: CommandConfig, exposure: Exposure) {
+  if (command.route !== true) return null
+  if (exposure.mode === "local") return portlessUrl(config, workspace, id, command)
+
+  const route = routeName(config.project, workspace, id, command.routeName)
+  return `https://${cloudflareHostname(route, exposure)}`
+}
+
+export function routeUrlsForConfig(config: DevConfig, workspace: string, exposure: Exposure = { mode: "local" }) {
   return Object.fromEntries(
     Object.entries(config.commands)
-      .map(([id, command]) => [id, portlessUrl(config, workspace, id, command)])
+      .map(([id, command]) => [id, publicUrl(config, workspace, id, command, exposure)])
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   )
 }
@@ -45,8 +54,8 @@ export function routeEnvironment(urls: Record<string, string>) {
   return env
 }
 
-export function routeEnvironmentForConfig(config: DevConfig, workspace: string) {
-  return routeEnvironment(routeUrls(config, workspace))
+export function routeEnvironmentForConfig(config: DevConfig, workspace: string, exposure: Exposure = { mode: "local" }) {
+  return routeEnvironment(routeUrlsForConfig(config, workspace, exposure))
 }
 
 export function websocketUrl(url: string) {
@@ -63,7 +72,7 @@ export function commandRoute(config: DevConfig, workspace: string, id: string, c
   return usesPortless(command) ? routeName(config.project, workspace, id, command.routeName) : null
 }
 
-export function commandProcess(run: string, route: string | null) {
+export function commandProcess(run: string, route: string | null, backendPort?: number) {
   if (!route) {
     return {
       executable: run,
@@ -75,9 +84,9 @@ export function commandProcess(run: string, route: string | null) {
 
   return {
     executable: "portless",
-    args: [route, "sh", "-lc", run],
+    args: [route, ...(backendPort ? ["--app-port", String(backendPort)] : []), "sh", "-lc", run],
     shell: false,
-    display: `portless ${route} sh -lc ${JSON.stringify(run)}`,
+    display: `portless ${route}${backendPort ? ` --app-port ${backendPort}` : ""} sh -lc ${JSON.stringify(run)}`,
   }
 }
 
