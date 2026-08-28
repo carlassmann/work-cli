@@ -63,7 +63,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 5
+export const DAEMON_PROTOCOL_VERSION = 6
 
 export type DaemonCommand =
   | {
@@ -72,6 +72,7 @@ export type DaemonCommand =
       workspace: WorkspaceRecord
       command: string
       exposure: Exposure
+      environment: Record<string, string>
     }
   | {
       type: "down"
@@ -90,12 +91,14 @@ export type DaemonCommand =
       workspace: WorkspaceRecord
       command: string
       exposure: Exposure
+      environment: Record<string, string>
     }
   | {
       type: "restartTracked"
       project: string
       workspace: string
       command: string
+      environment: Record<string, string>
     }
   | {
       type: "prune"

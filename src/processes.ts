@@ -11,7 +11,13 @@ import { isPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
 import type { CommandRecord, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
 
-export async function startCommand(config: DevConfig, workspace: WorkspaceRecord, id: string, exposure: Exposure = { mode: "local" }): Promise<Result<{ record: CommandRecord; started: boolean }>> {
+export async function startCommand(
+  config: DevConfig,
+  workspace: WorkspaceRecord,
+  id: string,
+  exposure: Exposure = { mode: "local" },
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const command = config.commands[id]
 
   if (!command) {
@@ -55,7 +61,7 @@ export async function startCommand(config: DevConfig, workspace: WorkspaceRecord
     cwd,
     log,
     env: {
-      ...childEnvironment({ ...process.env, ...config.env }),
+      ...childEnvironment({ ...environment, ...config.env }),
       WORK_PROJECT: config.project,
       WORK_WORKSPACE: workspace.workspace,
       WORK_COMMAND: id,
@@ -174,7 +180,12 @@ export async function stopCommand(project: string, workspace: string, id: string
   return ok(true)
 }
 
-export async function restartTrackedCommand(project: string, workspace: string, id: string): Promise<Result<{ record: CommandRecord; started: boolean }>> {
+export async function restartTrackedCommand(
+  project: string,
+  workspace: string,
+  id: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const stateResult = await readWorkspaceState(project, workspace)
   if (!stateResult.ok) return stateResult
 
@@ -197,7 +208,7 @@ export async function restartTrackedCommand(project: string, workspace: string, 
     cwd: command.cwd,
     log: command.log,
     env: {
-      ...childEnvironment({ ...process.env, ...state.env }),
+      ...childEnvironment({ ...environment, ...state.env }),
       WORK_PROJECT: project,
       WORK_WORKSPACE: workspace,
       WORK_COMMAND: id,

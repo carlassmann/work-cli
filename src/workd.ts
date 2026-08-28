@@ -17,6 +17,7 @@ type DesiredCommand = {
   workspace: WorkspaceRecord
   command: string
   exposure: Exposure
+  environment: Record<string, string>
 }
 
 const desired = new Map<string, DesiredCommand>()
@@ -118,7 +119,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
 
     case "run":
       return serialize(workspaceLock(command.config.project, command.workspace.workspace), () =>
-        startDesired(command.config, command.workspace, command.command, command.exposure),
+        startDesired(command.config, command.workspace, command.command, command.exposure, command.environment),
       )
 
     case "down":
@@ -163,13 +164,13 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
       return serialize(workspaceLock(command.config.project, command.workspace.workspace), async () => {
         const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command)
         if (!stop.ok) return stop
-        return startDesired(command.config, command.workspace, command.command, command.exposure)
+        return startDesired(command.config, command.workspace, command.command, command.exposure, command.environment)
       })
 
     case "restartTracked":
       return serialize(workspaceLock(command.project, command.workspace), async () => {
         desired.delete(key(command.project, command.workspace, command.command))
-        return restartTrackedCommand(command.project, command.workspace, command.command)
+        return restartTrackedCommand(command.project, command.workspace, command.command, command.environment)
       })
 
     case "prune":
@@ -181,12 +182,18 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
   }
 }
 
-async function startDesired(config: DevConfig, workspace: WorkspaceRecord, command: string, exposure: Exposure) {
-  const result = await startCommand(config, workspace, command, exposure)
+async function startDesired(
+  config: DevConfig,
+  workspace: WorkspaceRecord,
+  command: string,
+  exposure: Exposure,
+  environment: Record<string, string>,
+) {
+  const result = await startCommand(config, workspace, command, exposure, environment)
   const commandConfig = config.commands[command]
 
   if (result.ok && commandConfig?.restart === "on-exit") {
-    desired.set(key(config.project, workspace.workspace, command), { config, workspace, command, exposure })
+    desired.set(key(config.project, workspace.workspace, command), { config, workspace, command, exposure, environment })
   }
 
   return result
@@ -196,7 +203,7 @@ let reconcileFailureCount = 0
 
 async function reconcile() {
   for (const target of desired.values()) {
-    const result = await startCommand(target.config, target.workspace, target.command, target.exposure)
+    const result = await startCommand(target.config, target.workspace, target.command, target.exposure, target.environment)
 
     if (!result.ok) {
       reconcileFailureCount++

@@ -9,10 +9,16 @@ import type { DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
 const previousPath = process.env["PATH"]
+const previousWorkspaceValue = process.env["WORKSPACE_VALUE"]
 
 afterEach(() => {
   process.env["WORK_STATE_ROOT"] = previousStateRoot
   process.env["PATH"] = previousPath
+  if (previousWorkspaceValue === undefined) {
+    delete process.env["WORKSPACE_VALUE"]
+  } else {
+    process.env["WORKSPACE_VALUE"] = previousWorkspaceValue
+  }
 })
 
 describe("process lifecycle", () => {
@@ -132,6 +138,25 @@ describe("process lifecycle", () => {
 
     const state = await readWorkspaceState("tilly", "feature-x")
     assert.deepEqual(state.ok ? state.value?.env : undefined, { WORKSPACE_VALUE: "configured" })
+  })
+
+  test("uses the invoking client's environment instead of the daemon environment", async () => {
+    const root = await tempDir()
+    const workspace = testWorkspace(root)
+    const output = path.join(root, "env.txt")
+    const config = testConfig(
+      `node -e 'require("fs").writeFileSync(${JSON.stringify(output)}, process.env.WORKSPACE_VALUE)'`,
+    )
+
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    process.env["WORKSPACE_VALUE"] = "daemon"
+
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, {
+      ...process.env,
+      WORKSPACE_VALUE: "client",
+    })
+    assert.equal(started.ok, true)
+    assert.equal(await readSoon(output), "client")
   })
 
   test("keeps one Cloudflare connector synchronized with routed processes", async () => {

@@ -428,7 +428,14 @@ async function startConfigured(
   const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
   for (const [id] of entries) {
-    const response = await callDaemon({ type, config: ctx.config, workspace, command: id, exposure })
+    const response = await callDaemon({
+      type,
+      config: ctx.config,
+      workspace,
+      command: id,
+      exposure,
+      environment: childEnvironment(),
+    })
     if (!response.ok) return response
     printProcessStart(id, response.value.data, type === "restart" ? "restarted" : undefined)
   }
@@ -455,7 +462,11 @@ async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Resu
 }
 
 async function restartTracked(target: { project: string; workspace: string; command: string }): Promise<Result<void>> {
-  const response = await callDaemon({ type: "restartTracked", ...target })
+  const response = await callDaemon({
+    type: "restartTracked",
+    ...target,
+    environment: childEnvironment(),
+  })
   if (!response.ok) return response
 
   printProcessStart(`${target.project}/${target.workspace}/${target.command}`, response.value.data, "restarted")
