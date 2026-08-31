@@ -28,6 +28,7 @@ export type WorkspaceRecord = {
   workspace: string
   branch: string | null
   root: string
+  sourceRoot?: string
 }
 
 export type Exposure =
@@ -52,6 +53,8 @@ export type CommandRecord = {
   localUrl?: string | null
   exposure?: Exposure
   backendPort?: number
+  env?: Record<string, string>
+  restart?: RestartPolicy
   startedAt: string
   pid: number
 }
@@ -63,7 +66,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 6
+export const DAEMON_PROTOCOL_VERSION = 7
 
 export type DaemonCommand =
   | {
@@ -78,12 +81,14 @@ export type DaemonCommand =
       type: "down"
       project: string
       workspace: string
+      environment: Record<string, string>
     }
   | {
       type: "stop"
       project: string
       workspace: string
       command: string
+      environment: Record<string, string>
     }
   | {
       type: "restart"
@@ -102,6 +107,7 @@ export type DaemonCommand =
     }
   | {
       type: "prune"
+      environment: Record<string, string>
     }
   | {
       type: "ping"

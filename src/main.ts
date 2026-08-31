@@ -17,7 +17,7 @@ import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
 import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
-import { childEnvironment } from "./environment.js"
+import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
@@ -234,14 +234,21 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create, noCreate, remote })
   if (!workspace.ok) return workspace
 
+  let environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
+  if (!environment.ok) return environment
+
   const commands = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
-  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  let exposure = await resolveExposure(parsed.value.flags.cloudflare, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
   if (workspace.value.created) {
     console.log(`created ${workspace.value.workspace} from ${workspace.value.createdFrom}`)
-    const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value)
+    const setup = await runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value, environment.value)
     if (!setup.ok) return setup
+    environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
+    if (!environment.ok) return environment
+    exposure = await resolveExposure(parsed.value.flags.cloudflare, environment.value, ctx.value.config.project, workspace.value.workspace)
+    if (!exposure.ok) return exposure
   }
 
   if (commands.length === 0) {
@@ -265,10 +272,12 @@ async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  const environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
+  if (!environment.ok) return environment
+  const exposure = await resolveExposure(parsed.value.flags.cloudflare, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
-  return runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value)
+  return runWorkspaceSetup(ctx.value.config, ctx.value.root, workspace.value, exposure.value, environment.value)
 }
 
 async function runDown(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -311,7 +320,7 @@ async function downStates(states: Array<Pick<WorkspaceState, "project" | "worksp
   let count = 0
 
   for (const state of states) {
-    const response = await callDaemon({ type: "down", project: state.project, workspace: state.workspace })
+    const response = await callDaemon({ type: "down", project: state.project, workspace: state.workspace, environment: childEnvironment() })
     if (!response.ok) return response
 
     for (const id of response.value.data) {
@@ -349,7 +358,9 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
 
-  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  const environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
+  if (!environment.ok) return environment
+  const exposure = await resolveExposure(parsed.value.flags.cloudflare, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
   return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value)
@@ -391,7 +402,9 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const workspace = await resolveWorkspace(ctx.value, workspaceArg, { create: false, noCreate: true })
   if (!workspace.ok) return workspace
-  const exposure = resolveExposure(ctx.value.config, parsed.value.flags.cloudflare)
+  const environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
+  if (!environment.ok) return environment
+  const exposure = await resolveExposure(parsed.value.flags.cloudflare, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
   if (all) {
@@ -688,7 +701,7 @@ async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   const wsCmd = await parseWorkspaceAndCommand(args, "stop")
   if (!wsCmd.ok) return wsCmd
 
-  const response = await callDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command })
+  const response = await callDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command, environment: childEnvironment() })
   if (!response.ok) return response
 
   if (!response.value.data) {
@@ -725,11 +738,14 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
   const needsPortless = config?.ok ? Object.values(config.value.commands).some(usesPortless) : false
   console.log(`portless\t${needsPortless ? await commandExists("portless") ? "ok" : "missing" : "not needed"}`)
 
-  const cloudflareConfigured = Boolean(config?.ok && (config.value.env?.["WORK_CLOUDFLARE_DOMAIN"] || config.value.env?.["WORK_CLOUDFLARE_TUNNEL_ID"]))
+  const environment = root.ok
+    ? await loadWorkspaceEnvironment(root.value, root.value)
+    : ok(childEnvironment())
+  const cloudflareConfigured = environment.ok && Boolean(environment.value["WORK_CLOUDFLARE_DOMAIN"] || environment.value["WORK_CLOUDFLARE_TUNNEL_ID"])
   if (!cloudflareConfigured) {
     console.log("cloudflare\tnot configured")
   } else {
-    const exposure = cloudflareExposure(config?.ok ? config.value.env : {})
+    const exposure = cloudflareExposure(environment.ok ? environment.value : process.env)
     if (!exposure.ok) {
       console.log(`cloudflare\tinvalid\t${exposure.error.message}`)
     } else if (!await commandExists("cloudflared")) {
@@ -762,7 +778,7 @@ async function runPrune(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
   }
 
-  const response = await callDaemon({ type: "prune" })
+  const response = await callDaemon({ type: "prune", environment: childEnvironment() })
   if (!response.ok) return response
 
   const count = response.value.data
@@ -1027,7 +1043,13 @@ function forwardSignals(child: import("node:child_process").ChildProcess): () =>
   }
 }
 
-async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspace: WorkspaceResolution, exposure: Exposure = { mode: "local" }): Promise<Result<void>> {
+async function runWorkspaceSetup(
+  config: DevConfig,
+  sourceRoot: string,
+  workspace: WorkspaceResolution,
+  exposure: Exposure = { mode: "local" },
+  environment: Record<string, string> = childEnvironment(),
+): Promise<Result<void>> {
   const setup = config.worktrees?.setup
 
   if (!setup) {
@@ -1042,7 +1064,7 @@ async function runWorkspaceSetup(config: DevConfig, sourceRoot: string, workspac
       shell: true,
       stdio: "inherit",
       env: {
-        ...childEnvironment({ ...process.env, ...config.env }),
+        ...childEnvironment({ ...config.env, ...environment }),
         ...workspaceSetupEnv(config, sourceRoot, workspace, exposure),
       },
     })
@@ -1077,8 +1099,16 @@ function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: Wor
   }
 }
 
-function resolveExposure(config: DevConfig, cloudflare: boolean | undefined): Result<Exposure> {
-  return cloudflare ? cloudflareExposure(config.env) : ok({ mode: "local" })
+async function resolveExposure(
+  cloudflare: boolean | undefined,
+  environment: Record<string, string>,
+  project: string,
+  workspace: string,
+): Promise<Result<Exposure>> {
+  if (cloudflare) return cloudflareExposure(environment)
+  const state = await readWorkspaceState(project, workspace)
+  if (!state.ok) return state
+  return state.value?.exposure?.mode === "cloudflare" ? cloudflareExposure(environment) : ok({ mode: "local" })
 }
 
 function printProcessStart(command: string, result: StartResult, verb = result.started ? "started" : "already up") {
@@ -1148,6 +1178,7 @@ async function resolveWorkspace(
       workspace,
       branch: branch.ok ? branch.value : null,
       root: cwdRoot,
+      sourceRoot: root,
       created: false,
     })
   }
@@ -1176,6 +1207,7 @@ async function resolveWorkspace(
       workspace,
       branch: source.value.branch,
       root: worktreeRoot,
+      sourceRoot: root,
       created: true,
       createdFrom: sourceDescription,
     })
@@ -1188,6 +1220,7 @@ async function resolveWorkspace(
     workspace,
     branch: worktreeBranch.ok && worktreeBranch.value ? worktreeBranch.value : workspace,
     root: worktreeRoot,
+    sourceRoot: root,
     created: false,
   })
 }

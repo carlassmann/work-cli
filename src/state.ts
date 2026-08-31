@@ -22,6 +22,10 @@ export function daemonPidFile() {
   return path.join(stateRoot(), "workd.pid")
 }
 
+export function daemonLockFile() {
+  return path.join(stateRoot(), "workd.lock")
+}
+
 function workspaceStateDir(project: string, workspace: string) {
   return path.join(stateRoot(), "projects", project, "workspaces", workspace)
 }
@@ -102,4 +106,3 @@ async function readDirNames(dir: string): Promise<Array<string>> {
 function isNotFound(cause: unknown): boolean {
   return Boolean(cause && typeof cause === "object" && "code" in cause && cause.code === "ENOENT")
 }
-

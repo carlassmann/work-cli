@@ -4,14 +4,14 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { appError, debugLog, describe, err, errResult, ok } from "./result.js"
-import { isPidRunning } from "./shell.js"
+import { isPidRunning, processCommand } from "./shell.js"
 import { daemonPidFile, daemonSocketFile, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
 
 const DAEMON_START_TIMEOUT_MS = 3000
-const SEND_TIMEOUT_MS = 5000
+const SEND_TIMEOUT_MS = 120_000
 const PING_INTERVAL_MS = 50
 
 export type DaemonStatus = { running: boolean; pid: number | null }
@@ -79,7 +79,7 @@ export async function ensureDaemon(): Promise<Result<number>> {
   child.stderr?.destroy()
 
   if (!ready.ok) {
-    if (exitState.value) {
+    if (exitState.value && exitState.value.code !== 0) {
       const detail = stderrBuffer.trim() || `signal=${exitState.value.signal} code=${exitState.value.code}`
       return errResult("DaemonError", `workd crashed during startup: ${detail}`)
     }
@@ -101,7 +101,7 @@ export async function stopDaemon(): Promise<Result<void>> {
 
   if (!status.running) {
     await killStaleDaemon(status.pid)
-    await cleanupDaemonFiles()
+    await cleanupDaemonFiles(status.pid)
     return ok(undefined)
   }
 
@@ -117,7 +117,7 @@ export async function stopDaemon(): Promise<Result<void>> {
     return errResult("DaemonError", `workd pid=${status.pid} did not stop within 1000ms`)
   }
 
-  await cleanupDaemonFiles()
+  await cleanupDaemonFiles(status.pid)
   return ok(undefined)
 }
 
@@ -152,13 +152,17 @@ export async function sendDaemon<T extends DaemonCommand>(
   return ok(message !== undefined ? { data, message } : { data })
 }
 
-async function cleanupDaemonFiles() {
+async function cleanupDaemonFiles(expectedPid: number | null = null) {
+  const currentPid = await readDaemonPid()
+  if (expectedPid !== null && currentPid !== null && currentPid !== expectedPid) return
   await fs.rm(daemonSocketFile(), { force: true }).catch((cause) => debugLog("daemon", `rm socket: ${describe(cause)}`))
   await fs.rm(daemonPidFile(), { force: true }).catch((cause) => debugLog("daemon", `rm pid: ${describe(cause)}`))
 }
 
 async function killStaleDaemon(pid: number | null) {
   if (pid === null || !isPidRunning(pid)) return
+  const command = await processCommand(pid)
+  if (!command || !/(?:^|\/)workd\.(?:js|ts)(?:\s|$)/.test(command)) return
 
   try {
     process.kill(pid, "SIGKILL")
@@ -172,7 +176,8 @@ async function waitForDaemon(exited: () => { code: number | null; signal: NodeJS
   let lastError = "ping never returned"
 
   while (Date.now() - startedAt < DAEMON_START_TIMEOUT_MS) {
-    if (exited()) {
+    const exit = exited()
+    if (exit && exit.code !== 0) {
       return errResult("DaemonError", "workd exited before responding to ping")
     }
 
@@ -239,7 +244,8 @@ function parseResponse<T extends DaemonCommand>(data: string): Result<DaemonResp
 
 async function safeMkdir(dir: string): Promise<Result<void>> {
   try {
-    await fs.mkdir(dir, { recursive: true })
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+    await fs.chmod(dir, 0o700)
     return ok(undefined)
   } catch (cause) {
     return err(appError("IOError", `failed to create ${dir}`, cause))

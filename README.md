@@ -1,7 +1,7 @@
 # work
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D20.12-brightgreen.svg)](https://nodejs.org)
 [![status](https://img.shields.io/badge/status-experimental-yellow.svg)](#install)
 [![deps](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](package.json)
 
@@ -28,7 +28,7 @@ The individual pieces are already solved:
 
 `work` is the glue: a per-workspace setup script, a config of long-running commands, a tiny supervisor, and a single CLI to drive it.
 
-Zero runtime dependencies — just Node ≥ 20 stdlib. The full CLI ships as one ~30 KB JS file.
+Zero runtime dependencies — just Node ≥ 20.12 stdlib. The full CLI ships as one ~30 KB JS file.
 
 [portless]: https://github.com/vercel-labs/portless
 
@@ -97,23 +97,26 @@ cloudflared tunnel login
 cloudflared tunnel create work-cbook
 ```
 
-Put the settings in the workspace environment in `work.config.js`:
+Put the settings in a gitignored `.env.local` at the project root:
 
-```js
-export default {
-  env: {
-    WORK_CLOUDFLARE_DOMAIN: "example.com",
-    WORK_CLOUDFLARE_TUNNEL_ID: "<tunnel UUID>",
-    // Recommended: owner + random 64-bit token + hostname
-    WORK_CLOUDFLARE_MACHINE: "carl-7f3a91c8d2e4b6a8-cbook",
-  },
-  // ...
-}
+```sh
+WORK_CLOUDFLARE_DOMAIN=example.com
+WORK_CLOUDFLARE_TUNNEL_ID=<tunnel UUID>
+# Recommended: owner + random 64-bit token + hostname
+WORK_CLOUDFLARE_MACHINE=carl-7f3a91c8d2e4b6a8-cbook
 ```
 
 Generate the random token once with `openssl rand -hex 8`, keep the resulting machine value stable, and use a different value per machine. This makes URLs impractical to guess while preserving stable origins. It is obscurity, not authentication: anyone who learns a URL can open it. Do not publish the value in a public repository.
 
-Top-level `env` is inherited by workspace setup and commands. Global Cloudflare variables are ignored. `cloudflared tunnel create` stores credentials in its standard directory; `work` discovers them automatically and never passes them to setup scripts or dev servers.
+`work` loads `.env.local` from the project root, then the selected workspace;
+the invoking shell overrides both. It removes all `WORK_CLOUDFLARE_*` values
+before starting setup scripts or dev servers.
+Other Cloudflare variables, such as `CLOUDFLARE_API_TOKEN`, remain available to
+commands that need them. Once a workspace is running through Cloudflare,
+`work run`, `work restart`, and `work up` inherit that mode without another flag.
+Run `work down` before switching the workspace back to local mode.
+`cloudflared tunnel create` stores credentials in its standard directory; `work`
+discovers them automatically.
 
 The domain must use Cloudflare DNS. Keeping the complete work name in one label, directly below the zone, allows standard Universal SSL to cover it. `work` creates each exact DNS CNAME and keeps one machine-wide connector synchronized with active commands. DNS records remain stable after commands stop.
 
@@ -243,7 +246,7 @@ work docs setup          # setup-hook env vars
 
 ## Development
 
-Requires [Bun](https://bun.sh) for the dev loop. Build targets Node ≥ 20 with zero runtime dependencies.
+Requires [Bun](https://bun.sh) for the dev loop. Build targets Node ≥ 20.12 with zero runtime dependencies.
 
 ```sh
 bun run dev -- doctor   # run the CLI from source

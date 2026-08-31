@@ -49,6 +49,13 @@ Example:
 Workspace fields:
   env                 environment inherited by setup and every command
 
+Environment precedence:
+  work.config.js env
+  project .env.local
+  workspace .env.local
+  invoking shell
+  command env
+
 Command fields:
   run                 shell command to start
   label               optional display name
@@ -257,8 +264,8 @@ One-time machine setup:
   cloudflared tunnel login
   cloudflared tunnel create work-{machine}
 
-Workspace env in work.config.js:
-  WORK_CLOUDFLARE_DOMAIN     Cloudflare DNS zone, such as syntwin.ai
+Environment variables in a gitignored .env.local:
+  WORK_CLOUDFLARE_DOMAIN     Cloudflare DNS zone, such as example.com
   WORK_CLOUDFLARE_TUNNEL_ID  UUID printed by tunnel create
   WORK_CLOUDFLARE_MACHINE    stable machine label
 
@@ -269,21 +276,29 @@ Generate the token once:
   openssl rand -hex 8
 
 Example:
-  WORK_CLOUDFLARE_MACHINE: "carl-7f3a91c8d2e4b6a8-cbook"
+  WORK_CLOUDFLARE_MACHINE=alice-7f3a91c8d2e4b6a8-laptop
 
 Result:
-  https://carl-7f3a91c8d2e4b6a8-cbook-web-feature-tilly.syntwin.ai
+  https://alice-7f3a91c8d2e4b6a8-laptop-web-feature-app.example.com
 
 Keep the machine label stable and use a different value per machine. Do not
 publish it in a public repository. The random element makes discovery difficult;
 it does not authenticate users who already know the URL.
 
+work loads project .env.local, then workspace .env.local, then the invoking
+shell. Later sources override earlier ones. work strips WORK_CLOUDFLARE_*
+before starting setup or dev commands. Other Cloudflare variables remain
+available to commands that need them.
+
 Run:
   work setup --cloudflare
   work up --cloudflare
 
+An active Cloudflare workspace keeps that mode for later work run, restart, and
+up calls. Run work down before switching it back to local mode.
+
 Use a single hostname label directly below the Cloudflare zone so Universal SSL
-covers it. In WorkOS, allow https://*.syntwin.ai and the required callback path.`,
+covers it. In WorkOS, allow https://*.example.com and the required callback path.`,
 
   commands: `CLI commands:
   work init [project]

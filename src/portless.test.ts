@@ -99,13 +99,13 @@ describe("portless", () => {
     }, "feature-x", {
       mode: "cloudflare",
       machine: "cbook",
-      domain: "dev.example.com",
+      domain: "example.com",
       tunnelId: "11111111-1111-4111-8111-111111111111",
       credentialsFile: "/tmp/tunnel.json",
     })
 
-    assert.equal(env.WORK_URL, "https://cbook-web-feature-x-tilly.dev.example.com")
-    assert.equal(env.WORK_SYNC_URL, "https://cbook-sync-feature-x-tilly.dev.example.com")
-    assert.equal(env.WORK_SYNC_WS_URL, "wss://cbook-sync-feature-x-tilly.dev.example.com")
+    assert.equal(env.WORK_URL, "https://cbook-web-feature-x-tilly.example.com")
+    assert.equal(env.WORK_SYNC_URL, "https://cbook-sync-feature-x-tilly.example.com")
+    assert.equal(env.WORK_SYNC_WS_URL, "wss://cbook-sync-feature-x-tilly.example.com")
   })
 })
