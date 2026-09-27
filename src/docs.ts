@@ -169,6 +169,8 @@ Manual lifecycle:
   work daemon status
   work daemon stop
 
+Stopping workd leaves tracked commands running. Use work stop or work down to stop them.
+
 What workd owns:
   starting commands
   stopping commands

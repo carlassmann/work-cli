@@ -111,10 +111,10 @@ export async function stopDaemon(): Promise<Result<void>> {
     debugLog("daemon", `shutdown send failed: ${response.error.message}`)
   }
 
-  const stopped = await waitForDaemonStop(status.pid, 1000)
+  const stopped = await waitForDaemonStop(status.pid, SEND_TIMEOUT_MS)
 
   if (!stopped) {
-    return errResult("DaemonError", `workd pid=${status.pid} did not stop within 1000ms`)
+    return errResult("DaemonError", `workd pid=${status.pid} did not stop within ${SEND_TIMEOUT_MS}ms`)
   }
 
   await cleanupDaemonFiles(status.pid)
