@@ -356,7 +356,8 @@ Usage:
 Behavior:
   work up/run/stop/restart/prune auto-start workd when needed.
   workd owns configured command start/stop/restart.
-  Commands with restart: "on-exit" are restarted when they die.
+  Commands with restart: "on-exit" are restarted when they die while workd runs.
+  Stopping workd leaves tracked commands running; use work stop or work down to stop them.
 
 Examples:
   work daemon status

@@ -5,7 +5,7 @@ import { syncCloudflareTunnel } from "./cloudflare.js"
 import { debugLog, describe, formatError } from "./result.js"
 import { pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { processCommand } from "./shell.js"
-import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
+import { daemonLockFile, daemonPidFile, daemonSocketFile, readWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
@@ -276,19 +276,6 @@ async function shutdown() {
   shuttingDown = true
 
   server.close()
-  desired.clear()
-
-  const states = await listWorkspaceStates()
-  for (const state of states) {
-    for (const id of Object.keys(state.commands)) {
-      const result = await stopCommand(state.project, state.workspace, id, { syncCloudflare: false })
-      if (!result.ok) {
-        debugLog("workd", `shutdown stop ${state.project}/${state.workspace}/${id}: ${result.error.message}`)
-      }
-    }
-  }
-
-  await syncCloudflareTunnel()
 
   await fs.rm(daemonSocketFile(), { force: true }).catch((cause) => debugLog("workd", `rm socket: ${describe(cause)}`))
   await fs.rm(daemonPidFile(), { force: true }).catch((cause) => debugLog("workd", `rm pid: ${describe(cause)}`))

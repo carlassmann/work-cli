@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { callDaemon, daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
 import { readWorkspaceState } from "./state.js"
+import { commandRuntimeStatus } from "./processes.js"
 import { tempDir } from "./test-helpers.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
@@ -41,6 +42,62 @@ describe("daemon client", () => {
 
     await stopDaemon()
     assert.equal((await daemonStatus()).running, false)
+  })
+
+  test("stopping the daemon preserves commands in every workspace", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = {
+      project: "demo",
+      commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'" } },
+    }
+    const workspaces = ["first", "second"]
+    const pids: number[] = []
+
+    for (const name of workspaces) {
+      const started = await callDaemon({
+        type: "run",
+        config,
+        workspace: { project: "demo", workspace: name, branch: name, root },
+        command: "web",
+        exposure: { mode: "local" },
+        environment: { PATH: process.env["PATH"] ?? "" },
+      })
+      assert.equal(started.ok, true)
+      if (started.ok) pids.push(started.value.data.record.pid)
+    }
+
+    try {
+      const stopped = await stopDaemon()
+      assert.equal(stopped.ok, true)
+      for (const [index, name] of workspaces.entries()) {
+        const state = await readWorkspaceState("demo", name)
+        assert.equal(state.ok, true)
+        const record = state.ok ? state.value?.commands["web"] : undefined
+        assert.equal(record?.pid, pids[index])
+        if (record) assert.equal(await commandRuntimeStatus(record), "up")
+      }
+
+      const restarted = await ensureDaemon()
+      assert.equal(restarted.ok, true)
+      const repeated = await callDaemon({
+        type: "run",
+        config,
+        workspace: { project: "demo", workspace: "first", branch: "first", root },
+        command: "web",
+        exposure: { mode: "local" },
+        environment: { PATH: process.env["PATH"] ?? "" },
+      })
+      assert.equal(repeated.ok, true)
+      if (repeated.ok) {
+        assert.equal(repeated.value.data.started, false)
+        assert.equal(repeated.value.data.record.pid, pids[0])
+      }
+    } finally {
+      for (const name of workspaces) {
+        await callDaemon({ type: "stop", project: "demo", workspace: name, command: "web", environment: { PATH: process.env["PATH"] ?? "" } })
+      }
+    }
   })
 
   test("concurrent clients share one daemon", async () => {
