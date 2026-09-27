@@ -100,6 +100,55 @@ describe("daemon client", () => {
     }
   })
 
+  test("waits for an active command before stopping the daemon", async () => {
+    const root = await tempDir()
+    const bin = await tempDir("work-cli-bin-")
+    const dnsStarted = path.join(root, "dns-started")
+    const portless = path.join(bin, "portless")
+    const cloudflared = path.join(bin, "cloudflared")
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    await fs.writeFile(portless, '#!/bin/sh\nwhile [ "$1" != "sh" ]; do shift; done\nexec "$@"\n')
+    await fs.writeFile(cloudflared, `#!/bin/sh
+if [ "$2" = "route" ]; then
+  printf ready > ${JSON.stringify(dnsStarted)}
+  sleep 0.5
+  exit 0
+fi
+printf '%s\n' 'Registered tunnel connection'
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+`)
+    await fs.chmod(portless, 0o755)
+    await fs.chmod(cloudflared, 0o755)
+    const environment = { PATH: `${bin}:${process.env["PATH"] ?? ""}` }
+    const config = { project: "demo", commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'", route: true } } }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    const exposure = {
+      mode: "cloudflare" as const,
+      machine: "test",
+      domain: "example.com",
+      tunnelId: "11111111-1111-4111-8111-111111111111",
+      credentialsFile: path.join(root, "credentials.json"),
+    }
+    await fs.writeFile(exposure.credentialsFile, "{}")
+    assert.equal((await ensureDaemon()).ok, true)
+
+    const running = callDaemon({ type: "run", config, workspace, command: "web", exposure, environment })
+    try {
+      await waitForValue(dnsStarted, "ready")
+      const stopped = await stopDaemon()
+      const started = await running
+      assert.equal(stopped.ok, true)
+      assert.equal(started.ok, true)
+      const state = await readWorkspaceState("demo", "main")
+      const record = state.ok ? state.value?.commands["web"] : undefined
+      assert.ok(record)
+      if (record) assert.equal(await commandRuntimeStatus(record), "up")
+    } finally {
+      await callDaemon({ type: "stop", project: "demo", workspace: "main", command: "web", environment })
+    }
+  })
+
   test("concurrent clients share one daemon", async () => {
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
     const workd = path.join(process.cwd(), "src", "workd.ts")
@@ -142,6 +191,29 @@ describe("daemon client", () => {
     if (state.ok) assert.notEqual(state.value?.commands["web"]?.pid, firstPid)
 
     await sendDaemon({ type: "down", project: "demo", workspace: "main", environment: { PATH: process.env["PATH"] ?? "" } })
+  })
+
+  test("restores on-exit supervision after daemon restart", async () => {
+    const root = await tempDir()
+    const counter = path.join(root, "counter")
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const script = `const fs=require("fs");const file=${JSON.stringify(counter)};const next=Number(fs.existsSync(file)?fs.readFileSync(file,"utf8"):0)+1;fs.writeFileSync(file,String(next));setTimeout(()=>{},30000)`
+    const config = { project: "demo", commands: { web: { run: `node -e ${JSON.stringify(script)}`, restart: "on-exit" as const } } }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    const environment = { PATH: process.env["PATH"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+
+    try {
+      await waitForValue(counter, "1")
+      assert.equal((await stopDaemon()).ok, true)
+      assert.equal((await ensureDaemon()).ok, true)
+      process.kill(-started.value.data.record.pid, "SIGTERM")
+      await waitForValue(counter, "2")
+    } finally {
+      await callDaemon({ type: "stop", project: "demo", workspace: "main", command: "web", environment })
+    }
   })
 
   test("surfaces stderr when workd crashes during startup", async () => {

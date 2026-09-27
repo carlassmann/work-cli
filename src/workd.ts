@@ -2,10 +2,11 @@
 import fs from "node:fs/promises"
 import net from "node:net"
 import { syncCloudflareTunnel } from "./cloudflare.js"
+import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
-import { pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
+import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { processCommand } from "./shell.js"
-import { daemonLockFile, daemonPidFile, daemonSocketFile, readWorkspaceState, stateRoot } from "./state.js"
+import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
@@ -15,10 +16,17 @@ const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
 )
 
 type DesiredCommand = {
+  type: "configured"
   config: DevConfig
   workspace: WorkspaceRecord
   command: string
   exposure: Exposure
+  environment: Record<string, string>
+} | {
+  type: "tracked"
+  project: string
+  workspace: string
+  command: string
   environment: Record<string, string>
 }
 
@@ -48,9 +56,19 @@ await fs.chmod(stateRoot(), 0o700)
 const acquiredDaemonLock = await acquireDaemonLock()
 if (!acquiredDaemonLock) process.exit(0)
 const daemonLock = acquiredDaemonLock as import("node:fs/promises").FileHandle
+for (const state of await listWorkspaceStates()) {
+  for (const [command, record] of Object.entries(state.commands)) {
+    if (record.restart === "on-exit") {
+      desired.set(key(state.project, state.workspace, command), {
+        type: "tracked", project: state.project, workspace: state.workspace, command, environment: childEnvironment(),
+      })
+    }
+  }
+}
 await fs.rm(daemonSocketFile(), { force: true })
 await fs.writeFile(daemonPidFile(), `${process.pid}\n`)
 
+const activeRequests = new Set<Promise<void>>()
 const server = net.createServer((socket) => {
   let data = ""
   let handled = false
@@ -61,9 +79,11 @@ const server = net.createServer((socket) => {
 
     if (!handled && data.includes("\n")) {
       handled = true
-      void respond(socket, data).catch((cause) => {
+      const request = respond(socket, data).catch((cause) => {
         socket.end(`${JSON.stringify({ ok: false, tag: "DaemonError", error: describe(cause) })}\n`)
       })
+      activeRequests.add(request)
+      void request.finally(() => activeRequests.delete(request))
     }
   })
   socket.on("error", () => undefined)
@@ -71,8 +91,12 @@ const server = net.createServer((socket) => {
 
 server.listen(daemonSocketFile())
 
-setInterval(() => {
-  void maintain().catch((cause) => debugLog("workd", `maintenance failed: ${describe(cause)}`))
+let maintenanceTask: Promise<void> | null = null
+const maintenanceInterval = setInterval(() => {
+  if (shuttingDown || maintenanceTask) return
+  const task = maintain().catch((cause) => debugLog("workd", `maintenance failed: ${describe(cause)}`))
+  maintenanceTask = task
+  void task.finally(() => { if (maintenanceTask === task) maintenanceTask = null })
 }, 1000).unref()
 
 process.on("SIGTERM", () => void shutdown().catch((cause) => debugLog("workd", `shutdown failed: ${describe(cause)}`)))
@@ -109,6 +133,7 @@ async function handlePayload(payload: string): Promise<DaemonResponse> {
   if (typeof envelope["type"] !== "string" || !KNOWN_COMMAND_TYPES.has(envelope["type"])) {
     return { ok: false, error: `unknown daemon command type: ${envelope["type"]}`, tag: "DaemonError" }
   }
+  if (shuttingDown) return { ok: false, error: "workd is stopping", tag: "DaemonError" }
 
   const command = parsed as DaemonCommand
   const result = await handleCommand(command)
@@ -219,7 +244,7 @@ async function startDesired(
   const commandConfig = config.commands[command]
 
   if (result.ok && commandConfig?.restart === "on-exit") {
-    desired.set(key(config.project, workspace.workspace, command), { config, workspace, command, exposure, environment })
+    desired.set(key(config.project, workspace.workspace, command), { type: "configured", config, workspace, command, exposure, environment })
   }
 
   return result
@@ -248,15 +273,28 @@ async function maintain() {
 
 async function reconcile() {
   for (const [targetKey, target] of desired.entries()) {
-    const result = await serialize(workspaceLock(target.config.project, target.workspace.workspace), async () => {
+    const project = target.type === "configured" ? target.config.project : target.project
+    const workspace = target.type === "configured" ? target.workspace.workspace : target.workspace
+    const result = await serialize(workspaceLock(project, workspace), async () => {
       if (!desired.has(targetKey)) return { ok: true, value: { skipped: true } } as const
-      return startCommand(target.config, target.workspace, target.command, target.exposure, target.environment)
+      if (target.type === "configured") {
+        return startCommand(target.config, target.workspace, target.command, target.exposure, target.environment)
+      }
+      const state = await readWorkspaceState(project, workspace)
+      if (!state.ok) return state
+      const record = state.value?.commands[target.command]
+      if (!record) {
+        desired.delete(targetKey)
+        return { ok: true, value: { skipped: true } } as const
+      }
+      if (await commandRuntimeStatus(record) === "up") return { ok: true, value: { started: false } } as const
+      return restartTrackedCommand(project, workspace, target.command, target.environment)
     })
 
     if (!result.ok) {
       reconcileFailureCount++
       if (reconcileFailureCount === 1 || reconcileFailureCount % 30 === 0) {
-        debugLog("workd", `reconcile ${target.config.project}/${target.workspace.workspace}/${target.command} failed (${reconcileFailureCount}x): ${result.error.message}`)
+        debugLog("workd", `reconcile ${project}/${workspace}/${target.command} failed (${reconcileFailureCount}x): ${result.error.message}`)
       }
       continue
     }
@@ -275,7 +313,9 @@ async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
 
+  clearInterval(maintenanceInterval)
   server.close()
+  await Promise.allSettled([...activeRequests, ...(maintenanceTask ? [maintenanceTask] : [])])
 
   await fs.rm(daemonSocketFile(), { force: true }).catch((cause) => debugLog("workd", `rm socket: ${describe(cause)}`))
   await fs.rm(daemonPidFile(), { force: true }).catch((cause) => debugLog("workd", `rm pid: ${describe(cause)}`))
