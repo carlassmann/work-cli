@@ -48,6 +48,20 @@ Example:
 
 Workspace fields:
   env                 environment inherited by setup and every command
+  maxTtlSeconds       maximum command lifetime in seconds, 0 disables
+
+Global defaults: ~/.config/work/config.json, or $XDG_CONFIG_HOME/work/config.json.
+Example: { "maxTtlSeconds": 3600 }
+TTL precedence: WORK_MAX_TTL_SECONDS from the invoking shell, project maxTtlSeconds,
+global maxTtlSeconds, then unlimited. 0 disables TTL at any level.
+Set the project value in the main worktree's work.config.js for all its workspaces.
+Values must be finite and non-negative.
+TTL is captured when a command starts. Automatic restarts preserve its deadline;
+explicit restarts reset it and re-read env and global defaults. Tracked restarts
+use the stored project setting. Changing defaults leaves running commands unchanged.
+workd checks every second and stops expired commands
+without restarting them, including commands with restart: "on-exit".
+Deadlines survive daemon restarts. TTL requires a running daemon.
 
 Environment precedence:
   work.config.js env
@@ -182,6 +196,10 @@ What workd owns:
 Restart policy:
   restart: "manual"    do not restart after exit
   restart: "on-exit"   daemon restarts after process exits
+
+maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS limits command lifetime. Expired commands
+stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
+Prune preserves records for supervised commands so their deadlines remain intact.
 
 The daemon communicates over a Unix socket in ~/.work-cli.
 Logs and state remain file-based so they are inspectable.`,

@@ -15,6 +15,7 @@ export type CommandConfig = {
 
 export type DevConfig = {
   project: string
+  maxTtlSeconds?: number
   env?: Record<string, string>
   worktrees?: {
     dir?: string
@@ -56,17 +57,20 @@ export type CommandRecord = {
   env?: Record<string, string>
   restart?: RestartPolicy
   startedAt: string
+  maxTtlSeconds?: number
+  ttlStartedAt?: string
   pid: number
 }
 
 export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>
+  maxTtlSeconds?: number
   env?: Record<string, string>
   exposure?: Exposure
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 7
+export const DAEMON_PROTOCOL_VERSION = 8
 
 export type DaemonCommand =
   | {

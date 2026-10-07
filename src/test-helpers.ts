@@ -34,6 +34,7 @@ export async function runCli(args: Array<string>, options: { cwd: string; stateR
   const env = {
     ...process.env,
     WORK_STATE_ROOT: options.stateRoot ?? await tempDir("work-cli-state-"),
+    XDG_CONFIG_HOME: await tempDir("work-cli-config-"),
     ...options.env,
   }
 

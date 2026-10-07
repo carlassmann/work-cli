@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { validateSlug } from "./names.js"
@@ -8,6 +9,45 @@ import type { Result } from "./result.js"
 import type { DevConfig } from "./types.js"
 
 const configFileName = "work.config.js"
+
+export async function resolveMaxTtlSeconds(
+  config: Pick<DevConfig, "maxTtlSeconds">,
+  environment: NodeJS.ProcessEnv,
+): Promise<Result<number>> {
+  const raw = environment["WORK_MAX_TTL_SECONDS"]
+  if (raw !== undefined) {
+    return validateTtlSeconds(raw.trim() === "" ? NaN : Number(raw), "WORK_MAX_TTL_SECONDS")
+  }
+  if (config.maxTtlSeconds !== undefined) return validateTtlSeconds(config.maxTtlSeconds, "maxTtlSeconds")
+
+  const file = path.join(environment["XDG_CONFIG_HOME"] || path.join(os.homedir(), ".config"), "work", "config.json")
+  let contents: string
+  try {
+    contents = await fs.readFile(file, "utf8")
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return ok(0)
+    return errResult("ConfigError", `failed to read global config ${file}`, cause)
+  }
+  let globalConfig: unknown
+  try {
+    globalConfig = JSON.parse(contents)
+  } catch (cause) {
+    return errResult("ConfigError", `invalid JSON in global config ${file}`, cause)
+  }
+  if (!globalConfig || typeof globalConfig !== "object" || Array.isArray(globalConfig)) {
+    return errResult("ConfigError", `global config ${file} must contain an object`)
+  }
+  const value = (globalConfig as Record<string, unknown>)["maxTtlSeconds"]
+  return validateTtlSeconds(value === undefined ? 0 : value, `${file} maxTtlSeconds`)
+}
+
+function validateTtlSeconds(value: unknown, field: string): Result<number> {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return errResult("ConfigError", `${field} must be a finite, non-negative number of seconds`)
+  }
+
+  return ok(value)
+}
 
 export async function loadConfig(root: string): Promise<Result<DevConfig>> {
   const file = path.join(root, configFileName)
@@ -69,6 +109,9 @@ function validateConfig(config: DevConfig): Result<void> {
 
   const project = validateSlug(config.project, "project")
   if (!project.ok) return project
+
+  const ttl = validateTtlSeconds(config.maxTtlSeconds === undefined ? 0 : config.maxTtlSeconds, "maxTtlSeconds")
+  if (!ttl.ok) return ttl
 
   const worktrees = validateWorktrees(config)
   if (!worktrees.ok) return worktrees

@@ -1,17 +1,25 @@
-import { afterEach, describe, test } from "node:test"
+import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { callDaemon, daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
-import { readWorkspaceState } from "./state.js"
+import { readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { commandRuntimeStatus } from "./processes.js"
+import { isPidRunning } from "./shell.js"
 import { tempDir } from "./test-helpers.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
 const previousEntrypoint = process.env["WORK_DAEMON_ENTRYPOINT"]
+const previousConfigHome = process.env["XDG_CONFIG_HOME"]
+
+beforeEach(async () => {
+  process.env["XDG_CONFIG_HOME"] = await tempDir("work-cli-config-")
+})
 
 afterEach(async () => {
   await stopDaemon()
+  if (previousConfigHome === undefined) delete process.env["XDG_CONFIG_HOME"]
+  else process.env["XDG_CONFIG_HOME"] = previousConfigHome
   process.env["WORK_STATE_ROOT"] = previousStateRoot
   if (previousEntrypoint === undefined) {
     delete process.env["WORK_DAEMON_ENTRYPOINT"]
@@ -21,6 +29,165 @@ afterEach(async () => {
 })
 
 describe("daemon client", () => {
+  test("prune preserves supervised dead records and their deadlines before and after daemon recovery", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { project: "demo", maxTtlSeconds: 60, commands: { web: { run: "true", restart: "on-exit" as const } } }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      for (const recover of [false, true]) {
+        if (recover) {
+          assert.equal((await stopDaemon()).ok, true)
+          assert.equal((await ensureDaemon()).ok, true)
+        }
+        const pruned = await sendDaemon({ type: "prune", environment })
+        assert.ok(pruned.ok)
+        if (pruned.ok) assert.equal(pruned.value.data, 0)
+        const state = await readWorkspaceState("demo", "main")
+        assert.ok(state.ok && state.value?.commands["web"])
+        if (state.ok) assert.equal(state.value?.commands["web"]?.ttlStartedAt, started.value.data.record.ttlStartedAt)
+      }
+    } finally {
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
+    }
+  })
+
+  test("expires already-dead supervised records without respawning", async () => {
+    const root = await tempDir()
+    const counter = path.join(root, "dead-counter")
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { project: "demo", maxTtlSeconds: 60, commands: { web: { run: `node -e 'require("fs").appendFileSync(${JSON.stringify(counter)}, "started\\n")'`, restart: "on-exit" as const } } }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace: { project: "demo", workspace: "main", branch: "main", root }, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      await waitForValue(counter, "started\n")
+      assert.equal((await stopDaemon()).ok, true)
+      const state = await readWorkspaceState("demo", "main")
+      assert.ok(state.ok && state.value)
+      if (!state.ok || !state.value) return
+      state.value.commands["web"]!.ttlStartedAt = new Date(Date.now() - 61_000).toISOString()
+      assert.equal((await writeWorkspaceState(state.value)).ok, true)
+      assert.equal((await ensureDaemon()).ok, true)
+      await waitForEmptyWorkspace("demo", "main")
+      assert.equal(await fs.readFile(counter, "utf8"), "started\n")
+    } finally {
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
+    }
+  })
+
+  test("TTL shutdown kills children that ignore SIGTERM", async () => {
+    const root = await tempDir()
+    const childFile = path.join(root, "child.pid")
+    const script = path.join(root, "child.js")
+    await fs.writeFile(script, `process.on("SIGTERM", () => {}); require("fs").writeFileSync(${JSON.stringify(childFile)}, String(process.pid)); setInterval(() => {}, 1000)`)
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { project: "demo", maxTtlSeconds: 1, commands: { web: { run: `node ${JSON.stringify(script)} & wait` } } }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace: { project: "demo", workspace: "main", branch: "main", root }, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      await waitForEmptyWorkspace("demo", "main")
+      const childPid = Number(await fs.readFile(childFile, "utf8"))
+      const deadline = Date.now() + 2000
+      while (isPidRunning(childPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+      assert.equal(isPidRunning(childPid), false)
+    } finally {
+      try { process.kill(-started.value.data.record.pid, "SIGKILL") } catch {}
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
+    }
+  })
+
+  test("explicit configured restart resets TTL and invalid defaults leave the process running", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { project: "demo", maxTtlSeconds: 60, commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'" } } }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      const invalid = await callDaemon({ type: "restart", config, workspace, command: "web", exposure: { mode: "local" }, environment: { ...environment, WORK_MAX_TTL_SECONDS: "invalid" } })
+      assert.equal(invalid.ok, false)
+      assert.equal(await commandRuntimeStatus(started.value.data.record), "up")
+      const restarted = await callDaemon({ type: "restart", config, workspace, command: "web", exposure: { mode: "local" }, environment: { ...environment, WORK_MAX_TTL_SECONDS: "120" } })
+      assert.ok(restarted.ok)
+      if (restarted.ok) {
+        assert.equal(restarted.value.data.record.maxTtlSeconds, 120)
+        assert.equal(restarted.value.data.record.ttlStartedAt, restarted.value.data.record.startedAt)
+        assert.notEqual(restarted.value.data.record.pid, started.value.data.record.pid)
+        assert.notEqual(restarted.value.data.record.ttlStartedAt, started.value.data.record.ttlStartedAt)
+      }
+    } finally {
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
+    }
+  })
+
+  test("expires commands without respawning them, across automatic and daemon restarts", { timeout: 15_000 }, async () => {
+    const root = await tempDir()
+    const counter = path.join(root, "ttl-counter")
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const script = `const fs=require("fs");const file=${JSON.stringify(counter)};const next=Number(fs.existsSync(file)?fs.readFileSync(file,"utf8"):0)+1;fs.writeFileSync(file,String(next));if(next>1)setTimeout(()=>{},30000)`
+    const config = {
+      project: "demo",
+      commands: {
+        web: { run: `node -e ${JSON.stringify(script)}`, restart: "on-exit" as const },
+        worker: { run: "node -e 'setTimeout(() => {}, 30000)'" },
+      },
+    }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "", WORK_MAX_TTL_SECONDS: "6" }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    const started = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+
+    try {
+      const worker = await callDaemon({ type: "run", config, workspace, command: "worker", exposure: { mode: "local" }, environment })
+      assert.ok(worker.ok)
+      const unlimited = await callDaemon({ type: "run", config: { ...config, maxTtlSeconds: 0 }, workspace: { ...workspace, workspace: "unlimited" }, command: "worker", exposure: { mode: "local" }, environment: { ...environment, WORK_MAX_TTL_SECONDS: "0" } })
+      assert.ok(unlimited.ok)
+      await waitForValue(counter, "2")
+      const state = await readWorkspaceState("demo", "main")
+      const restarted = state.ok ? state.value?.commands["web"] : undefined
+      assert.ok(restarted)
+      assert.equal(restarted?.ttlStartedAt, started.value.data.record.ttlStartedAt)
+      assert.equal(restarted?.maxTtlSeconds, 6)
+      if (restarted) assert.equal(await commandRuntimeStatus(restarted), "up")
+      assert.equal((await stopDaemon()).ok, true)
+      assert.equal((await ensureDaemon()).ok, true)
+      const recovered = await readWorkspaceState("demo", "main")
+      assert.equal(recovered.ok ? recovered.value?.commands["web"]?.ttlStartedAt : undefined, started.value.data.record.ttlStartedAt)
+
+      const deadline = Date.now() + 9000
+      let remaining: number | undefined
+      while (Date.now() < deadline) {
+        const current = await readWorkspaceState("demo", "main")
+        remaining = current.ok ? Object.keys(current.value?.commands ?? {}).length : undefined
+        if (remaining === 0) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      assert.equal(remaining, 0)
+      if (restarted) assert.equal(await commandRuntimeStatus(restarted), "dead")
+      if (worker.ok) assert.equal(await commandRuntimeStatus(worker.value.data.record), "dead")
+      if (unlimited.ok) assert.equal(await commandRuntimeStatus(unlimited.value.data.record), "up")
+      await new Promise((resolve) => setTimeout(resolve, 1100))
+      assert.equal(await fs.readFile(counter, "utf8"), "2")
+      const afterExpiry = await readWorkspaceState("demo", "main")
+      assert.deepEqual(afterExpiry.ok ? afterExpiry.value?.commands : undefined, {})
+    } finally {
+      for (const name of ["main", "unlimited"]) {
+        await callDaemon({ type: "down", project: "demo", workspace: name, environment })
+      }
+    }
+  })
+
   test("starts, answers ping, reports status, and stops", async () => {
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
 
@@ -61,7 +228,7 @@ describe("daemon client", () => {
         workspace: { project: "demo", workspace: name, branch: name, root },
         command: "web",
         exposure: { mode: "local" },
-        environment: { PATH: process.env["PATH"] ?? "" },
+        environment: { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" },
       })
       assert.equal(started.ok, true)
       if (started.ok) pids.push(started.value.data.record.pid)
@@ -86,7 +253,7 @@ describe("daemon client", () => {
         workspace: { project: "demo", workspace: "first", branch: "first", root },
         command: "web",
         exposure: { mode: "local" },
-        environment: { PATH: process.env["PATH"] ?? "" },
+        environment: { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" },
       })
       assert.equal(repeated.ok, true)
       if (repeated.ok) {
@@ -95,7 +262,7 @@ describe("daemon client", () => {
       }
     } finally {
       for (const name of workspaces) {
-        await callDaemon({ type: "stop", project: "demo", workspace: name, command: "web", environment: { PATH: process.env["PATH"] ?? "" } })
+        await callDaemon({ type: "stop", project: "demo", workspace: name, command: "web", environment: { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" } })
       }
     }
   })
@@ -120,7 +287,7 @@ while :; do sleep 1; done
 `)
     await fs.chmod(portless, 0o755)
     await fs.chmod(cloudflared, 0o755)
-    const environment = { PATH: `${bin}:${process.env["PATH"] ?? ""}` }
+    const environment = { PATH: `${bin}:${process.env["PATH"] ?? ""}`, XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
     const config = { project: "demo", commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'", route: true } } }
     const workspace = { project: "demo", workspace: "main", branch: "main", root }
     const exposure = {
@@ -179,7 +346,7 @@ while :; do sleep 1; done
       workspace,
       command: "web",
       exposure: { mode: "local" },
-      environment: { PATH: process.env["PATH"] ?? "" },
+      environment: { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" },
     })
     assert.equal(started.ok, true)
     if (!started.ok) return
@@ -190,7 +357,7 @@ while :; do sleep 1; done
     assert.equal(state.ok, true)
     if (state.ok) assert.notEqual(state.value?.commands["web"]?.pid, firstPid)
 
-    await sendDaemon({ type: "down", project: "demo", workspace: "main", environment: { PATH: process.env["PATH"] ?? "" } })
+    await sendDaemon({ type: "down", project: "demo", workspace: "main", environment: { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" } })
   })
 
   test("restores on-exit supervision after daemon restart", async () => {
@@ -200,7 +367,7 @@ while :; do sleep 1; done
     const script = `const fs=require("fs");const file=${JSON.stringify(counter)};const next=Number(fs.existsSync(file)?fs.readFileSync(file,"utf8"):0)+1;fs.writeFileSync(file,String(next));setTimeout(()=>{},30000)`
     const config = { project: "demo", commands: { web: { run: `node -e ${JSON.stringify(script)}`, restart: "on-exit" as const } } }
     const workspace = { project: "demo", workspace: "main", branch: "main", root }
-    const environment = { PATH: process.env["PATH"] ?? "" }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
     const started = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
     assert.equal(started.ok, true)
     if (!started.ok) return
@@ -251,4 +418,14 @@ async function waitForValue(file: string, expected: string) {
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   assert.equal(await fs.readFile(file, "utf8").catch(() => ""), expected)
+}
+
+async function waitForEmptyWorkspace(project: string, workspace: string) {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const state = await readWorkspaceState(project, workspace)
+    if (state.ok && state.value && Object.keys(state.value.commands).length === 0) return
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.fail(`commands still tracked for ${project}/${workspace}`)
 }

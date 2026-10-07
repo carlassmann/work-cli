@@ -167,6 +167,28 @@ export default {
 `WORK_SOURCE_ROOT` always resolves to the main worktree via `git worktree list`, so it works the same whether you ran `work` from the main repo or from another worktree.
 Configured commands receive the same routed URL variables.
 
+Set a global default in `~/.config/work/config.json`:
+
+```json
+{ "maxTtlSeconds": 3600 }
+```
+
+With `XDG_CONFIG_HOME` set, work reads `$XDG_CONFIG_HOME/work/config.json` instead.
+Set `maxTtlSeconds` at the top level of the main worktree's `work.config.js` to
+override the global default for that project's workspaces. Use
+`export WORK_MAX_TTL_SECONDS=3600` to override both for commands started from that
+shell. Precedence is env, project config, global config, then unlimited.
+Values must be finite, non-negative seconds; `0` disables TTL at any level.
+
+The daemon captures TTL when each command starts and checks expiry every second.
+Automatic restarts and daemon restarts preserve the deadline. Explicit restarts
+reset it and read the current env and global default. Restarts from tracked state
+use the stored project setting. Changing a default leaves running commands on
+their original deadline. Expired commands stay stopped, even with `restart: "on-exit"`.
+TTL requires a running daemon.
+
+<!-- written with gpt-6 in codex -->
+
 Day in the life:
 
 ```sh

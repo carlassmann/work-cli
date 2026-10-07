@@ -1,18 +1,26 @@
 import fs from "node:fs/promises"
 import path from "node:path"
-import { afterEach, describe, test } from "node:test"
+import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
 import { syncCloudflareTunnel } from "./cloudflare.js"
 import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { isPidRunning } from "./shell.js"
 import { tempDir } from "./test-helpers.js"
 import type { DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
 const previousPath = process.env["PATH"]
 const previousWorkspaceValue = process.env["WORKSPACE_VALUE"]
+const previousConfigHome = process.env["XDG_CONFIG_HOME"]
+
+beforeEach(async () => {
+  process.env["XDG_CONFIG_HOME"] = await tempDir("work-cli-config-")
+})
 
 afterEach(() => {
+  if (previousConfigHome === undefined) delete process.env["XDG_CONFIG_HOME"]
+  else process.env["XDG_CONFIG_HOME"] = previousConfigHome
   process.env["WORK_STATE_ROOT"] = previousStateRoot
   process.env["PATH"] = previousPath
   if (previousWorkspaceValue === undefined) {
@@ -23,6 +31,125 @@ afterEach(() => {
 })
 
 describe("process lifecycle", () => {
+  test("starts from global config and re-resolves TTL on tracked restarts", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const environment = { PATH: process.env["PATH"], XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] }
+    const file = path.join(environment.XDG_CONFIG_HOME!, "work", "config.json")
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '{"maxTtlSeconds": 60}')
+    const started = await startCommand(testConfig("node -e 'setTimeout(() => {}, 30000)'"), testWorkspace(root), "web", { mode: "local" }, environment)
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      assert.equal(started.value.record.maxTtlSeconds, 60)
+      await fs.writeFile(file, '{"maxTtlSeconds": 120}')
+      const automatic = await restartTrackedCommand("tilly", "feature-x", "web", environment, { preserveTtl: true })
+      assert.ok(automatic.ok)
+      if (automatic.ok) assert.equal(automatic.value.record.maxTtlSeconds, 60)
+      const manual = await restartTrackedCommand("tilly", "feature-x", "web", environment)
+      assert.ok(manual.ok)
+      if (manual.ok) assert.equal(manual.value.record.maxTtlSeconds, 120)
+      const disabled = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_MAX_TTL_SECONDS: "0" })
+      assert.ok(disabled.ok)
+      if (disabled.ok) {
+        assert.equal(disabled.value.record.maxTtlSeconds, undefined)
+        assert.equal(disabled.value.record.ttlStartedAt, undefined)
+      }
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
+  test("automatic restart paths refuse expired records and missing state", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { ...testConfig("true"), maxTtlSeconds: 60 }
+    const workspace = testWorkspace(root)
+    const started = await startCommand(config, workspace, "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+    const state = await readWorkspaceState("tilly", "feature-x")
+    assert.ok(state.ok && state.value)
+    if (!state.ok || !state.value) return
+    const record = state.value.commands["web"]!
+    record.ttlStartedAt = new Date(Date.now() - 61_000).toISOString()
+    assert.equal((await writeWorkspaceState(state.value)).ok, true)
+    const environment = { PATH: process.env["PATH"], WORK_MAX_TTL_SECONDS: "invalid" }
+    const configured = await startCommand(config, workspace, "web", { mode: "local" }, environment, { preserveTtl: true })
+    const tracked = await restartTrackedCommand("tilly", "feature-x", "web", environment, { preserveTtl: true })
+    for (const result of [configured, tracked]) {
+      assert.ok(result.ok)
+      if (result.ok) {
+        assert.equal(result.value.started, false)
+        assert.equal(result.value.record.pid, record.pid)
+      }
+    }
+    await stopCommand("tilly", "feature-x", "web")
+    assert.equal((await startCommand(config, workspace, "web", { mode: "local" }, {}, { preserveTtl: true })).ok, false)
+  })
+
+  test("stops resistant children when the shell exits or has already exited", async () => {
+    for (const suffix of [" & wait", " &"]) {
+      const root = await tempDir()
+      process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+      const childFile = path.join(root, "child.pid")
+      const script = path.join(root, "child.js")
+      await fs.writeFile(script, `process.on("SIGTERM", () => {}); require("fs").writeFileSync(${JSON.stringify(childFile)}, String(process.pid)); setInterval(() => {}, 1000)`)
+      const config = { ...testConfig(`node ${JSON.stringify(script)}${suffix}`), maxTtlSeconds: 0 }
+      const started = await startCommand(config, testWorkspace(root), "web")
+      assert.ok(started.ok)
+      if (!started.ok) continue
+      try {
+        const childPid = Number(await readSoon(childFile))
+        assert.equal(isPidRunning(childPid), true)
+        const stopped = await stopCommand("tilly", "feature-x", "web")
+        assert.ok(stopped.ok)
+        const deadline = Date.now() + 2000
+        while (isPidRunning(childPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+        assert.equal(isPidRunning(childPid), false)
+      } finally {
+        try { process.kill(-started.value.record.pid, "SIGKILL") } catch {}
+        await stopCommand("tilly", "feature-x", "web")
+      }
+    }
+  })
+
+  test("persists TTL and preserves it only for automatic restarts", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const workspace = testWorkspace(root)
+    const config = testConfig("node -e 'setTimeout(() => {}, 30000)'")
+    const environment = { PATH: process.env["PATH"], WORK_MAX_TTL_SECONDS: "60" }
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, environment)
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+
+    try {
+      assert.equal(started.value.record.maxTtlSeconds, 60)
+      const state = await readWorkspaceState("tilly", "feature-x")
+      assert.ok(state.ok && state.value)
+      if (!state.ok || !state.value) return
+      const record = state.value.commands["web"]!
+      record.ttlStartedAt = new Date(Date.now() - 10_000).toISOString()
+      assert.equal((await writeWorkspaceState(state.value)).ok, true)
+
+      const automatic = await restartTrackedCommand("tilly", "feature-x", "web", environment, { preserveTtl: true })
+      assert.ok(automatic.ok)
+      if (automatic.ok) assert.equal(automatic.value.record.ttlStartedAt, record.ttlStartedAt)
+
+      const manual = await restartTrackedCommand("tilly", "feature-x", "web", environment)
+      assert.ok(manual.ok)
+      if (manual.ok) {
+        assert.equal(manual.value.record.maxTtlSeconds, 60)
+        assert.equal(manual.value.record.ttlStartedAt, manual.value.record.startedAt)
+        assert.notEqual(manual.value.record.ttlStartedAt, record.ttlStartedAt)
+      }
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
   test("starts, records, and stops a configured command", async () => {
     const root = await tempDir()
     const workspace = testWorkspace(root)
@@ -180,7 +307,7 @@ describe("process lifecycle", () => {
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
     await fs.writeFile(path.join(projectRoot, ".env.local"), "PROJECT_VALUE=first\n")
 
-    const invokingEnvironment = { PATH: process.env["PATH"] }
+    const invokingEnvironment = { PATH: process.env["PATH"], XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] }
     const started = await startCommand(config, workspace, "web", { mode: "local" }, invokingEnvironment)
     assert.equal(started.ok, true)
     assert.equal(await readSoon(output), "first:command")

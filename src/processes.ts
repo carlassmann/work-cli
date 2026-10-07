@@ -3,6 +3,7 @@ import fsp from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { reserveBackendPort, syncCloudflareTunnel } from "./cloudflare.js"
+import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
@@ -17,6 +18,7 @@ export async function startCommand(
   id: string,
   exposure: Exposure = { mode: "local" },
   invokingEnvironment: NodeJS.ProcessEnv = process.env,
+  { preserveTtl = false }: { preserveTtl?: boolean } = {},
 ): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const command = config.commands[id]
 
@@ -38,6 +40,10 @@ export async function startCommand(
   if (!stateResult.ok) return stateResult
   const state = stateResult.value
   const existing = state?.commands[id]
+  if (preserveTtl && !existing) return errResult("ProcessError", `no tracked command: ${workspace.workspace}/${id}`)
+  if (preserveTtl && existing && commandTtlExpired(existing)) return ok({ record: existing, started: false })
+  const ttl = preserveTtl ? ok(existing?.maxTtlSeconds ?? 0) : await resolveMaxTtlSeconds(config, invokingEnvironment)
+  if (!ttl.ok) return ttl
   const stateMode = state?.exposure?.mode ?? "local"
   const commandStatuses = await Promise.all(Object.values(state?.commands ?? {}).map(commandRuntimeStatus))
   const hasLiveCommand = commandStatuses.includes("up")
@@ -69,6 +75,7 @@ export async function startCommand(
   if (!backendPortResult.ok) return backendPortResult
   const backendPort = backendPortResult.value
   const commandExec = commandProcess(command.run, route, backendPort)
+  if (preserveTtl && existing && commandTtlExpired(existing)) return ok({ record: existing, started: false })
   const pid = await spawnLogged(id, commandExec, {
     cwd,
     log,
@@ -83,6 +90,8 @@ export async function startCommand(
   })
   if (!pid.ok) return pid
 
+  const startedAt = new Date().toISOString()
+  const maxTtlSeconds = ttl.value
   const record: CommandRecord = {
     id,
     label: command.label ?? id,
@@ -98,13 +107,19 @@ export async function startCommand(
     ...(backendPort ? { backendPort } : {}),
     ...(command.env ? { env: command.env } : {}),
     ...(command.restart ? { restart: command.restart } : {}),
-    startedAt: new Date().toISOString(),
+    startedAt,
+    ...(maxTtlSeconds > 0 ? {
+      maxTtlSeconds,
+      ttlStartedAt: preserveTtl && existing ? existing.ttlStartedAt ?? existing.startedAt : startedAt,
+    } : {}),
   }
 
   const nextState: WorkspaceState = state ?? freshState(workspace)
   nextState.root = workspace.root
   nextState.branch = workspace.branch
   nextState.sourceRoot = workspace.sourceRoot ?? workspace.root
+  if (config.maxTtlSeconds !== undefined) nextState.maxTtlSeconds = config.maxTtlSeconds
+  else delete nextState.maxTtlSeconds
   if (config.env) nextState.env = childEnvironment(config.env)
   else delete nextState.env
   nextState.exposure = exposure
@@ -214,6 +229,7 @@ export async function restartTrackedCommand(
   workspace: string,
   id: string,
   invokingEnvironment: NodeJS.ProcessEnv = process.env,
+  { preserveTtl = false }: { preserveTtl?: boolean } = {},
 ): Promise<Result<{ record: CommandRecord; started: boolean }>> {
   const stateResult = await readWorkspaceState(project, workspace)
   if (!stateResult.ok) return stateResult
@@ -229,6 +245,10 @@ export async function restartTrackedCommand(
     return errResult("ProcessError", `tracked record for ${workspace}/${id} predates this work version. Run: work stop ${id} && work run ${id}`)
   }
 
+  if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
+  const ttl = preserveTtl ? ok(command.maxTtlSeconds ?? 0) : await resolveMaxTtlSeconds(state, invokingEnvironment)
+  if (!ttl.ok) return ttl
+
   const environment = await loadWorkspaceEnvironment(
     state.sourceRoot ?? state.root,
     state.root,
@@ -240,6 +260,7 @@ export async function restartTrackedCommand(
   if (!stopped.ok) return stopped
 
   const commandExec = commandProcess(command.run, command.route, command.backendPort)
+  if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
   const pid = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
     log: command.log,
@@ -259,6 +280,13 @@ export async function restartTrackedCommand(
     pid: pid.value,
     command: commandExec.display,
     startedAt: new Date().toISOString(),
+  }
+  if (ttl.value > 0) {
+    record.maxTtlSeconds = ttl.value
+    record.ttlStartedAt = preserveTtl ? command.ttlStartedAt ?? command.startedAt : record.startedAt
+  } else {
+    delete record.maxTtlSeconds
+    delete record.ttlStartedAt
   }
 
   state.commands[id] = record
@@ -298,6 +326,7 @@ type WorkspaceSerializer = <T>(project: string, workspace: string, task: () => P
 export async function pruneDeadCommands(
   environment: NodeJS.ProcessEnv = process.env,
   serializeWorkspace: WorkspaceSerializer = (_project, _workspace, task) => task(),
+  isSupervised: (project: string, workspace: string, id: string) => boolean = () => false,
 ): Promise<Result<number>> {
   const states = await listWorkspaceStates()
   let pruned = 0
@@ -309,7 +338,10 @@ export async function pruneDeadCommands(
       let workspacePruned = 0
 
       for (const [id, command] of Object.entries(current.value.commands)) {
+        if (isSupervised(listedState.project, listedState.workspace, id)) continue
         if (!await commandIsUp(command)) {
+          const stopped = await stopTrackedProcess(command)
+          if (!stopped.ok) return stopped
           delete current.value.commands[id]
           workspacePruned++
         }
@@ -342,12 +374,18 @@ export async function commandRuntimeStatus(command: CommandRecord): Promise<"up"
   return await isTrackedPidRunning(command.pid, command.startedAt) ? "up" : "dead"
 }
 
+export function commandTtlExpired(command: CommandRecord): boolean {
+  return Boolean(command.maxTtlSeconds &&
+    (Date.now() - Date.parse(command.ttlStartedAt ?? command.startedAt)) / 1000 >= command.maxTtlSeconds)
+}
+
 async function commandIsUp(command: CommandRecord) {
   return await commandRuntimeStatus(command) === "up"
 }
 
 async function stopTrackedProcess(command: CommandRecord): Promise<Result<void>> {
-  if (await commandRuntimeStatus(command) === "up") {
+  if (await commandRuntimeStatus(command) === "up" ||
+    (!isPidRunning(command.pid) && processGroupIsRunning(command.pid))) {
     await stopProcessTree(command.pid)
   }
 
@@ -402,12 +440,22 @@ async function stopProcessTree(pid: number) {
   }
 
   for (let waited = 0; waited < 1000; waited += 50) {
-    if (!isPidRunning(pid)) return
+    if (!processGroupIsRunning(pid) && !isPidRunning(pid)) return
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
-  if (isPidRunning(pid)) {
+  if (processGroupIsRunning(pid) || isPidRunning(pid)) {
     sendSignal(pid, "SIGKILL")
+  }
+}
+
+function processGroupIsRunning(pid: number): boolean {
+  if (pid <= 1) return false
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "EPERM"
   }
 }
 

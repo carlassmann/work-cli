@@ -2,9 +2,10 @@
 import fs from "node:fs/promises"
 import net from "node:net"
 import { syncCloudflareTunnel } from "./cloudflare.js"
+import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
-import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
+import { commandRuntimeStatus, commandTtlExpired, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { processCommand } from "./shell.js"
 import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
@@ -202,6 +203,8 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
 
     case "restart":
       return serialize(workspaceLock(command.config.project, command.workspace.workspace), async () => {
+        const ttl = await resolveMaxTtlSeconds(command.config, command.environment)
+        if (!ttl.ok) return ttl
         const state = await readWorkspaceState(command.config.project, command.workspace.workspace)
         if (!state.ok) return state
         const existing = state.value?.commands[command.command]
@@ -210,22 +213,22 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
         }
         const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command, { syncCloudflare: false, environment: command.environment })
         if (!stop.ok) return stop
+        desired.delete(key(command.config.project, command.workspace.workspace, command.command))
         return startDesired(command.config, command.workspace, command.command, command.exposure, command.environment)
       })
 
     case "restartTracked":
       return serialize(workspaceLock(command.project, command.workspace), async () => {
         const targetKey = key(command.project, command.workspace, command.command)
-        const existing = desired.get(targetKey)
         const result = await restartTrackedCommand(command.project, command.workspace, command.command, command.environment)
-        if (result.ok && existing) desired.set(targetKey, { ...existing, environment: command.environment })
+        if (result.ok && result.value.record.restart === "on-exit") {
+          desired.set(targetKey, { type: "tracked", project: command.project, workspace: command.workspace, command: command.command, environment: command.environment })
+        }
         return result
       })
 
     case "prune":
-      return pruneDeadCommands(command.environment, (project, workspace, task) =>
-        serialize(workspaceLock(project, workspace), task),
-      )
+      return pruneCommands(command.environment)
 
     case "shutdown":
       setTimeout(() => void shutdown().catch((cause) => debugLog("workd", `shutdown failed: ${describe(cause)}`)), 10)
@@ -243,8 +246,13 @@ async function startDesired(
   const result = await startCommand(config, workspace, command, exposure, environment)
   const commandConfig = config.commands[command]
 
-  if (result.ok && commandConfig?.restart === "on-exit") {
-    desired.set(key(config.project, workspace.workspace, command), { type: "configured", config, workspace, command, exposure, environment })
+  if (result.ok) {
+    const targetKey = key(config.project, workspace.workspace, command)
+    if (result.value.record.restart === "on-exit" && commandConfig) {
+      desired.set(targetKey, { type: "configured", config, workspace, command, exposure, environment })
+    } else {
+      desired.delete(targetKey)
+    }
   }
 
   return result
@@ -258,16 +266,42 @@ async function maintain() {
   if (maintenanceRunning) return
   maintenanceRunning = true
   try {
+    await expireCommands()
     await reconcile()
     maintenanceTicks++
     if (maintenanceTicks % 5 === 0) {
-      const pruned = await pruneDeadCommands(process.env, (project, workspace, task) =>
-        serialize(workspaceLock(project, workspace), task),
-      )
+      const pruned = await pruneCommands(process.env)
       if (!pruned.ok) debugLog("workd", `automatic prune failed: ${pruned.error.message}`)
     }
   } finally {
     maintenanceRunning = false
+  }
+}
+
+function pruneCommands(environment: NodeJS.ProcessEnv) {
+  return pruneDeadCommands(environment, (project, workspace, task) =>
+    serialize(workspaceLock(project, workspace), task),
+    (project, workspace, id) => desired.has(key(project, workspace, id)),
+  )
+}
+
+async function expireCommands() {
+  for (const listed of await listWorkspaceStates()) {
+    if (!Object.values(listed.commands).some((record) => record.maxTtlSeconds)) continue
+    await serialize(workspaceLock(listed.project, listed.workspace), async () => {
+      const state = await readWorkspaceState(listed.project, listed.workspace)
+      if (!state.ok) {
+        debugLog("workd", `TTL state read failed: ${state.error.message}`)
+        return
+      }
+      for (const [id, record] of Object.entries(state.value?.commands ?? {})) {
+        if (!commandTtlExpired(record)) continue
+
+        desired.delete(key(listed.project, listed.workspace, id))
+        const stopped = await stopCommand(listed.project, listed.workspace, id)
+        if (!stopped.ok) debugLog("workd", `TTL stop ${listed.project}/${listed.workspace}/${id} failed: ${stopped.error.message}`)
+      }
+    })
   }
 }
 
@@ -277,9 +311,6 @@ async function reconcile() {
     const workspace = target.type === "configured" ? target.workspace.workspace : target.workspace
     const result = await serialize(workspaceLock(project, workspace), async () => {
       if (!desired.has(targetKey)) return { ok: true, value: { skipped: true } } as const
-      if (target.type === "configured") {
-        return startCommand(target.config, target.workspace, target.command, target.exposure, target.environment)
-      }
       const state = await readWorkspaceState(project, workspace)
       if (!state.ok) return state
       const record = state.value?.commands[target.command]
@@ -287,8 +318,15 @@ async function reconcile() {
         desired.delete(targetKey)
         return { ok: true, value: { skipped: true } } as const
       }
+      if (commandTtlExpired(record)) {
+        desired.delete(targetKey)
+        return stopCommand(project, workspace, target.command, { environment: target.environment })
+      }
       if (await commandRuntimeStatus(record) === "up") return { ok: true, value: { started: false } } as const
-      return restartTrackedCommand(project, workspace, target.command, target.environment)
+      if (target.type === "configured") {
+        return startCommand(target.config, target.workspace, target.command, target.exposure, target.environment, { preserveTtl: true })
+      }
+      return restartTrackedCommand(project, workspace, target.command, target.environment, { preserveTtl: true })
     })
 
     if (!result.ok) {
