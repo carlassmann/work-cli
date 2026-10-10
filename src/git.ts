@@ -21,12 +21,12 @@ export async function gitMainWorktree(cwd: string): Promise<Result<string>> {
     return errResult("GitError", `failed to list git worktrees from ${cwd}`, result.error)
   }
 
-  const firstLine = result.value.split("\n", 1)[0] ?? ""
+  const firstLine = (result.value.split(/\r?\n/, 1)[0] ?? "").trim()
   if (!firstLine.startsWith("worktree ")) {
     return errResult("GitError", `unexpected output from git worktree list: ${result.value.slice(0, 120)}`)
   }
 
-  return ok(firstLine.slice("worktree ".length))
+  return ok(firstLine.slice("worktree ".length).trim())
 }
 
 export async function gitBranch(cwd: string): Promise<Result<string | null>> {
@@ -120,7 +120,7 @@ async function remoteBranchExists(root: string, remote: string, branch: string) 
 async function listRemotes(root: string): Promise<Result<Array<string>>> {
   const result = await exec("git", ["remote"], root)
   if (!result.ok) return errResult("GitError", `failed to list git remotes in ${root}`, result.error)
-  return ok(result.value.split("\n").filter(Boolean))
+  return ok(result.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
 }
 
 export async function createWorktree(root: string, dir: string, source: BranchSource): Promise<Result<void>> {
@@ -161,21 +161,22 @@ async function staleWorktreeRecord(root: string, dir: string, branch: string): P
   ].join("\n"))
 }
 
-function parseWorktreeList(output: string) {
+export function parseWorktreeList(output: string) {
   const records: Array<{ worktree: string; branch?: string; prunable?: string }> = []
   let current: { worktree: string; branch?: string; prunable?: string } | null = null
 
-  for (const line of output.split("\n")) {
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim()
     if (line.startsWith("worktree ")) {
       if (current) records.push(current)
-      current = { worktree: line.slice("worktree ".length) }
+      current = { worktree: line.slice("worktree ".length).trim() }
       continue
     }
 
     if (!current) continue
 
     if (line.startsWith("branch ")) {
-      current.branch = line.slice("branch ".length)
+      current.branch = line.slice("branch ".length).trim()
     } else if (line.startsWith("prunable")) {
       current.prunable = line.slice("prunable".length).trim()
     }
