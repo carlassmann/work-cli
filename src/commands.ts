@@ -17,6 +17,7 @@ export const commandSpecs = [
   { name: "watch", summary: "Live-refresh the ps table.", flags: ["-a", "--all", "-n", "--interval"] },
   { name: "logs", summary: "Print or follow command logs.", flags: ["-f", "--follow", "-p", "--project", "-w", "--workspace"] },
   { name: "urls", summary: "List workspace URLs.", flags: ["-p", "--project"] },
+  { name: "wait", summary: "Wait for a command URL to respond.", flags: ["-p", "--project", "-w", "--workspace", "--timeout"] },
   { name: "stop", summary: "Stop a tracked command.", flags: ["-p", "--project", "-w", "--workspace"] },
   { name: "doctor", summary: "Check project setup.", flags: [] },
   { name: "prune", summary: "Remove dead process records.", flags: [] },

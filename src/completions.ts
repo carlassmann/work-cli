@@ -242,7 +242,7 @@ ${zshSubcommands}
 	        _work_emit configured
 	      fi
 	      ;;
-	    logs|stop|restart)
+	    logs|stop|restart|wait)
 	      if (( pos == 1 )); then
 	        if [[ "$has_workspace" == "1" ]]; then
 	          _work_emit commands
@@ -297,10 +297,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval)
+      -w|--workspace|-p|--project|-n|--interval|--timeout)
         (( i += 2 ))
         ;;
-      --workspace=*|--project=*|--interval=*)
+      --workspace=*|--project=*|--interval=*|--timeout=*)
         (( i++ ))
         ;;
       -*)
@@ -328,10 +328,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval)
+      -p|--project|-n|--interval|--timeout)
         (( i += 2 ))
         ;;
-      --project=*|--interval=*)
+      --project=*|--interval=*|--timeout=*)
         (( i++ ))
         ;;
       *)
@@ -453,7 +453,7 @@ const bashScript = `_work() {
 	        values=$(work _complete configured 2>/dev/null)
 	      fi
 	      ;;
-	    logs|stop|restart)
+	    logs|stop|restart|wait)
 	      if [[ $pos -eq 1 ]]; then
 	        if [[ "$has_workspace" == "1" ]]; then
 	          values=$(work _complete commands 2>/dev/null)
@@ -507,10 +507,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval)
+      -w|--workspace|-p|--project|-n|--interval|--timeout)
         i=$((i + 2))
         ;;
-      --workspace=*|--project=*|--interval=*)
+      --workspace=*|--project=*|--interval=*|--timeout=*)
         i=$((i + 1))
         ;;
       -*)
@@ -538,10 +538,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval)
+      -p|--project|-n|--interval|--timeout)
         i=$((i + 2))
         ;;
-      --project=*|--interval=*)
+      --project=*|--interval=*|--timeout=*)
         i=$((i + 1))
         ;;
       *)

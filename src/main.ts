@@ -12,6 +12,7 @@ import { createConfig, loadConfig } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
 import { commandRuntimeStatus } from "./processes.js"
+import { waitForUrl } from "./readiness.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
@@ -127,6 +128,7 @@ function commandHandlers(): Record<Exclude<CommandName, "help">, CommandHandler>
     watch: runWatch,
     logs: runLogs,
     urls: runUrls,
+    wait: runWait,
     stop: runStop,
     doctor: runDoctor,
     prune: runPrune,
@@ -697,8 +699,35 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
+async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args, {
+    flags: { project: valueFlag("p"), workspace: valueFlag("w"), timeout: valueFlag() },
+  })
+  if (!parsed.ok) return parsed
+
+  const timeout = parsed.value.flags.timeout === undefined ? 60 : Number(parsed.value.flags.timeout)
+  if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(timeout * 1_000)) {
+    return errResult("CLIError", `invalid timeout: ${parsed.value.flags.timeout}`)
+  }
+
+  const target = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "wait")
+  if (!target.ok) return target
+  const state = await readWorkspaceState(target.value.project, target.value.workspace)
+  if (!state.ok) return state
+  const record = state.value?.commands[target.value.command]
+  if (!record) return errResult("CLIError", `no tracked command: ${target.value.workspace}/${target.value.command}`)
+  if (!record.url) return errResult("CLIError", `no URL for ${target.value.workspace}/${target.value.command}; enable routing for this command`)
+
+  const ready = await waitForUrl(record.url, timeout * 1_000)
+  if (!ready.ok) return ready
+  console.log(record.url)
+  return ok(undefined)
+}
+
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const wsCmd = await parseWorkspaceAndCommand(args, "stop")
+  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
+  if (!parsed.ok) return parsed
+  const wsCmd = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "stop")
   if (!wsCmd.ok) return wsCmd
 
   const response = await callDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command, environment: childEnvironment() })
@@ -899,11 +928,12 @@ async function runComplete(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function parseWorkspaceAndCommand(args: ReadonlyArray<string>, commandName: "stop"): Promise<Result<{ project: string; workspace: string; command: string }>> {
-  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
-  if (!parsed.ok) return parsed
-
-  const target = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
+async function resolveWorkspaceAndCommand(
+  positional: ReadonlyArray<string>,
+  flags: { project: string | undefined; workspace: string | undefined },
+  commandName: "stop" | "wait",
+): Promise<Result<{ project: string; workspace: string; command: string }>> {
+  const target = workspaceCommandArgs(positional, flags.workspace)
   if (!target.ok) return target
   const command = target.value.command
   if (!command) {
@@ -911,15 +941,15 @@ async function parseWorkspaceAndCommand(args: ReadonlyArray<string>, commandName
   }
 
   const ctx = await loadProjectContext()
-  if (!ctx.ok || parsed.value.flags.project) {
+  if (!ctx.ok || flags.project) {
     return resolveTrackedCommand(command, {
-      project: parsed.value.flags.project,
+      project: flags.project,
       workspace: target.value.workspace,
     })
   }
 
-  const workspace = parsed.value.flags.workspace
-    ? slugify(parsed.value.flags.workspace)
+  const workspace = flags.workspace
+    ? slugify(flags.workspace)
     : target.value.workspace
       ? slugify(target.value.workspace)
     : await defaultWorkspace(ctx.value.cwdRoot)

@@ -16,7 +16,7 @@ Commands:
 ${commandList}
 
 The workspace is implied from the current git branch. Pass it explicitly
-as a positional to up/setup/down/urls/cd/run/restart/logs/stop,
+as a positional to up/setup/down/urls/cd/run/restart/logs/stop/wait,
 or via -w where supported.
 State-only commands also work outside a project; ps/status/watch show all tracked state there.
 
@@ -33,6 +33,7 @@ Examples:
   work logs -f web
   work stop web
   work urls feature-x
+  work wait feature-x web
   work doctor
   work daemon status
   work docs portless
@@ -319,6 +320,31 @@ Empty state:
 Examples:
   work urls
   work urls feature-x`,
+
+  wait: `work wait
+
+Wait for a tracked command's published URL to respond with HTTP 2xx or 3xx.
+Redirects count as ready without following them. Error responses and connection
+failures are retried until the timeout. This checks HTTP availability, not
+application correctness, and never starts or restarts a command.
+
+Usage:
+  work wait [workspace] <command> [--timeout <seconds>]
+  work wait [-p project] [-w workspace] <command> [--timeout <seconds>]
+
+Options:
+  -p, --project <name>      Target project when outside a project.
+  -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
+  --timeout <seconds>      Positive timeout in seconds. Defaults to 60.
+
+Output:
+  The URL on success. On timeout, a diagnostic on stderr and exit code 1.
+  For local HTTPS, launch with NODE_EXTRA_CA_CERTS=/path/to/ca.pem if Node
+  does not already trust the proxy's CA.
+
+Examples:
+  work wait web
+  work wait feature-x web --timeout 120`,
 
   doctor: `work doctor
 

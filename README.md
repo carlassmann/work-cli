@@ -39,6 +39,7 @@ work create feature-x       # create a worktree without setup or processes
 work create feature-x --remote origin  # fetch + track a remote branch
 work up feature-x --create   # create worktree, run setup, start configured servers
 work urls feature-x          # see where everything is reachable
+work wait feature-x web      # wait for HTTP availability before opening/testing
 work logs -f web             # tail one service
 work down feature-x          # tear it all down
 ```
@@ -51,6 +52,17 @@ Routed commands get a stable URL of the form:
 ```
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
+
+Starting a process does not mean its app has finished compiling. Use
+`work wait [workspace] <command> [--timeout <seconds>]` before opening a preview
+or running browser tests. It probes the tracked public URL until it returns
+HTTP 2xx or 3xx (without following redirects), printing the URL on success.
+Connection errors and HTTP 4xx/5xx are retried for up to 60 seconds by default.
+A timeout exits with code 1 and the last probe diagnostic. The command must
+already be tracked and have a routed URL; waiting does not start any processes.
+For local HTTPS, Node must trust the proxy's CA. If it is not already trusted
+by your Node runtime, set `NODE_EXTRA_CA_CERTS=/path/to/ca.pem` when launching
+`work wait`. Certificate verification stays enabled.
 
 ## Install
 
