@@ -556,7 +556,7 @@ async function trackedCommandTable(all: boolean, json = false): Promise<Result<s
         command: command.id,
         status,
         pid: command.pid,
-        url: command.url,
+        url: command.url ?? null,
       })
     }
   }

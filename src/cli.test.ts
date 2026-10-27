@@ -350,7 +350,6 @@ describe("cli", () => {
           route: null,
           cwd: root,
           log: path.join(root, "web.log"),
-          url: null,
           startedAt: new Date().toISOString(),
           pid,
         },
