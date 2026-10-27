@@ -5,60 +5,6 @@ import assert from "node:assert/strict"
 import { git, initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
 
 describe("cli", () => {
-  test("JSON inspection emits empty arrays without human output", async (t) => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    t.after(() => Promise.all([root, stateRoot].map((dir) => fs.rm(dir, { recursive: true, force: true }))))
-
-    for (const command of ["ps", "status", "urls"]) {
-      const result = await runCli([command, "--json"], { cwd: root, stateRoot })
-      assert.equal(result.exitCode, 0)
-      assert.equal(result.stdout, "[]\n")
-      assert.equal(result.stderr, "")
-    }
-  })
-
-  test("JSON inspection retains workspace scope, filters URLs and omits secrets", async (t) => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    t.after(() => Promise.all([root, stateRoot].map((dir) => fs.rm(dir, { recursive: true, force: true }))))
-    await initGitRepo(root)
-    await writeFile(path.join(root, "work.config.js"), 'export default { project: "demo", commands: {} }')
-    const record = {
-      id: "web", pid: 2_147_483_647, url: "https://web-main-demo.localhost",
-      log: "unused", cwd: root, command: "SECRET=private-value node server.js",
-      env: { SECRET: "private-value" }, startedAt: new Date().toISOString(),
-    }
-    for (const project of ["demo", "other"]) {
-      await writeFile(path.join(stateRoot, "projects", project, "workspaces/main/state.json"), JSON.stringify({
-        project, workspace: "main", branch: "main", root, env: { SECRET: "private-value" },
-        commands: { web: record, worker: { ...record, id: "worker", url: null } },
-      }))
-    }
-
-    const status = await runCli(["status", "--json"], { cwd: root, stateRoot })
-    assert.equal(status.exitCode, 0)
-    assert.deepEqual(JSON.parse(status.stdout), [
-      { project: "demo", workspace: "main", command: "web", status: "dead", pid: record.pid, url: record.url },
-      { project: "demo", workspace: "main", command: "worker", status: "dead", pid: record.pid, url: null },
-    ])
-    assert.equal(status.stderr, "")
-
-    const all = await runCli(["ps", "--all", "--json"], { cwd: root, stateRoot })
-    assert.equal(all.exitCode, 0)
-    assert.equal(JSON.parse(all.stdout).length, 4)
-    assert.ok(!all.stdout.includes("private-value"))
-
-    const urls = await runCli(["urls", "main", "-p", "other", "--json"], { cwd: root, stateRoot })
-    assert.equal(urls.exitCode, 0)
-    assert.deepEqual(JSON.parse(urls.stdout), [{ project: "other", workspace: "main", command: "web", url: record.url }])
-    assert.equal(urls.stderr, "")
-
-    const table = await runCli(["urls"], { cwd: root, stateRoot })
-    assert.equal(table.exitCode, 0)
-    assert.match(table.stdout, /workspace\s+command\s+url\nmain\s+web\s+https:/)
-  })
-
   test("prints curated help without requiring a git repo", async () => {
     const root = await tempDir()
     const result = await runCli(["--help"], { cwd: root })
@@ -439,6 +385,19 @@ describe("cli", () => {
     assert.ok(result.stdout.includes("web"))
     assert.ok(!result.stdout.includes("tilly/other"))
     assert.ok(!result.stdout.includes("api"))
+
+    const json = await runCli(["status", "--json"], { cwd: root, stateRoot })
+    assert.equal(json.exitCode, 0)
+    assert.equal(json.stderr, "")
+    const [record] = JSON.parse(json.stdout)
+    assert.equal(JSON.parse(json.stdout).length, 1)
+    assert.deepEqual(Object.keys(record).sort(), ["command", "pid", "project", "status", "url", "workspace"])
+    assert.equal(record.project, "tilly")
+    assert.equal(record.workspace, "main")
+    assert.equal(record.pid, pid)
+    assert.equal(record.url, null)
+    const empty = await runCli(["urls", "--json"], { cwd: root, stateRoot })
+    assert.equal(empty.stdout, "[]\n")
   })
 
   test("state commands work outside a configured project", async () => {
@@ -472,6 +431,11 @@ describe("cli", () => {
     assert.equal(urls.exitCode, 0)
     assert.ok(urls.stdout.includes("tilly/feature-x"))
     assert.ok(urls.stdout.includes("https://web-feature-x-tilly.localhost"))
+
+    const json = await runCli(["urls", "-p", "tilly", "feature-x", "--json"], { cwd: root, stateRoot })
+    assert.equal(json.exitCode, 0)
+    assert.equal(json.stderr, "")
+    assert.deepEqual(JSON.parse(json.stdout), [{ project: "tilly", workspace: "feature-x", command: "web", url: "https://web-feature-x-tilly.localhost" }])
 
     const ps = await runCli(["ps"], { cwd: root, stateRoot })
     assert.equal(ps.exitCode, 0)

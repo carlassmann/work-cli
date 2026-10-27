@@ -234,15 +234,9 @@ List tracked commands for the current workspace, or all tracked state outside a 
 Usage:
   work ps
   work ps -a
-  work ps --json
 
 Output:
   status    project/workspace    command    pid    url
-
-JSON:
-  --json prints an array of { project, workspace, command, status, pid, url }.
-  pid is a number, url can be null, and status is process up/dead, not HTTP readiness.
-  Empty state is []. Errors stay on stderr with exit code 1.
 
 Status:
   commands show up/dead
@@ -273,13 +267,9 @@ List tracked commands for the current workspace, or all tracked state outside a 
 Usage:
   work status
   work status -a
-  work status --json
 
 Output:
   status    project/workspace    command    pid    url
-
-JSON:
-  --json has the same array format as work ps --json.
 
 Empty state:
   no tracked commands`,
@@ -319,8 +309,6 @@ Arguments:
 
 Options:
   -p, --project <name>      Filter tracked state by project.
-  --json                   Print an array of { project, workspace, command, url }.
-                           Empty state is []. Errors stay on stderr with exit code 1.
 
 URL shape:
   {command}-{workspace}-{project}.localhost

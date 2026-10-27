@@ -11,7 +11,7 @@ import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
-import { commandStatuses, commandUrls } from "./inspection.js"
+import { commandRuntimeStatus } from "./processes.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
@@ -493,7 +493,7 @@ async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
   }
 
-  const table = await trackedCommandOutput(parsed.value.flags.all, parsed.value.flags.json)
+  const table = await trackedCommandTable(parsed.value.flags.all, parsed.value.flags.json)
   if (!table.ok) return table
 
   console.log(table.value)
@@ -522,7 +522,7 @@ async function runWatch(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   try {
     while (!stopped) {
-      const table = await trackedCommandOutput(all)
+      const table = await trackedCommandTable(all)
       if (!table.ok) return table
 
       const header = `work watch${all ? " -a" : ""}  every ${intervalSec}s  (ctrl-c to exit)`
@@ -539,14 +539,29 @@ async function runWatch(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function trackedCommandOutput(all: boolean, json = false): Promise<Result<string>> {
+async function trackedCommandTable(all: boolean, json = false): Promise<Result<string>> {
   const statesResult = all ? ok(await listWorkspaceStates()) : await currentWorkspaceStates()
   if (!statesResult.ok) return statesResult
 
-  const commands = await commandStatuses(statesResult.value)
-  if (json) return ok(JSON.stringify(commands))
-  const rows = commands.map((command) => [command.status, `${command.project}/${command.workspace}`, command.command, String(command.pid), command.url ?? ""])
+  const rows: Array<Array<string>> = []
+  const records = []
 
+  for (const state of statesResult.value) {
+    for (const command of Object.values(state.commands)) {
+      const status = await commandRuntimeStatus(command)
+      rows.push([status, `${state.project}/${state.workspace}`, command.id, String(command.pid), command.url ?? ""])
+      records.push({
+        project: state.project,
+        workspace: state.workspace,
+        command: command.id,
+        status,
+        pid: command.pid,
+        url: command.url,
+      })
+    }
+  }
+
+  if (json) return ok(JSON.stringify(records))
   if (rows.length === 0) {
     return ok("no tracked commands")
   }
@@ -653,33 +668,57 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   const extra = unexpectedPositional(parsed.value.positional, 1)
   if (extra) return extra
   const ctx = await loadProjectContext()
-  let states: Array<WorkspaceState>
-  let localWorkspace: string | undefined
   if (!ctx.ok || parsed.value.flags.project) {
-    const found = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
-    if (!found.ok) return found
-    states = found.value
-  } else {
-    localWorkspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
-    const state = await readWorkspaceState(ctx.value.config.project, localWorkspace)
-    if (!state.ok) return state
-    states = state.value ? [state.value] : []
-  }
+    const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
+    if (!states.ok) return states
+    if (parsed.value.flags.json) {
+      console.log(urlsJson(states.value))
+      return ok(undefined)
+    }
 
-  const urls = commandUrls(states)
-  if (parsed.value.flags.json) {
-    console.log(JSON.stringify(urls))
+    const rows = states.value.flatMap((state) =>
+      Object.values(state.commands)
+        .filter((command) => command.url)
+        .map((command) => [`${state.project}/${state.workspace}`, command.id, command.url ?? ""]),
+    )
+
+    if (rows.length === 0) {
+      console.log(workspaceArg ? `no routed commands for ${workspaceArg}` : "no routed commands")
+    } else {
+      console.log(formatTable([["workspace", "command", "url"], ...rows]))
+    }
+
     return ok(undefined)
   }
-  const rows = urls.map((command) => [localWorkspace ?? `${command.project}/${command.workspace}`, command.command, command.url])
+
+  const workspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
+  const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
+  if (!stateResult.ok) return stateResult
+  if (parsed.value.flags.json) {
+    console.log(urlsJson(stateResult.value ? [stateResult.value] : []))
+    return ok(undefined)
+  }
+  const rows: Array<Array<string>> = []
+
+  for (const command of Object.values(stateResult.value?.commands ?? {})) {
+    if (command.url) {
+      rows.push([workspace, command.id, command.url])
+    }
+  }
+
   if (rows.length === 0) {
-    const workspace = localWorkspace ?? workspaceArg
-    console.log(workspace ? `no routed commands for ${workspace}` : "no routed commands")
+    console.log(`no routed commands for ${workspace}`)
   } else {
     console.log(formatTable([["workspace", "command", "url"], ...rows]))
   }
 
   return ok(undefined)
+}
+
+function urlsJson(states: Array<WorkspaceState>): string {
+  return JSON.stringify(states.flatMap((state) => Object.values(state.commands)
+    .filter((command) => command.url)
+    .map((command) => ({ project: state.project, workspace: state.workspace, command: command.id, url: command.url }))))
 }
 
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
