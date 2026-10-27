@@ -16,7 +16,6 @@ Core workflow:
   work run -w feature-x web
   work status
   work urls feature-x
-  work wait feature-x web
   work logs -f -w feature-x web
   work restart -w feature-x web
   work doctor

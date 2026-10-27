@@ -2,59 +2,9 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { createServer } from "node:http"
 import { git, initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
 
 describe("cli", () => {
-  test("wait probes a selected tracked URL and reports timeout and missing routes", async (t) => {
-    const root = await tempDir()
-    const stateRoot = await tempDir("work-cli-state-")
-    t.after(() => Promise.all([root, stateRoot].map((dir) => fs.rm(dir, { recursive: true, force: true }))))
-    const server = createServer((request, response) => {
-      response.writeHead(request.url === "/failed" ? 503 : 200)
-      response.end()
-    })
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-    t.after(() => { server.closeAllConnections(); server.close() })
-    const address = server.address()
-    assert.ok(address && typeof address !== "string")
-    const url = `http://127.0.0.1:${address.port}`
-    const record = { id: "web", pid: process.pid, url, log: "unused", cwd: root, command: "unused", startedAt: new Date().toISOString() }
-    const state = { project: "demo", workspace: "feature-x", branch: null, root, commands: { web: record } }
-    const file = path.join(stateRoot, "projects/demo/workspaces/feature-x/state.json")
-    await writeFile(file, JSON.stringify(state))
-
-    const ready = await runCli(["wait", "-p", "demo", "-w", "feature-x", "web"], { cwd: root, stateRoot })
-    assert.equal(ready.exitCode, 0)
-    assert.equal(ready.stdout, `${url}\n`)
-    assert.equal(ready.stderr, "")
-
-    record.url = `${url}/failed`
-    await writeFile(file, JSON.stringify(state))
-    const timeout = await runCli(["wait", "feature-x", "web", "--timeout", "0.1"], { cwd: root, stateRoot })
-    assert.equal(timeout.exitCode, 1)
-    assert.equal(timeout.stdout, "")
-    assert.match(timeout.stderr, /not ready within 0.1s/)
-
-    await writeFile(file, JSON.stringify({ ...state, commands: { web: { ...record, url: null } } }))
-    const missing = await runCli(["wait", "feature-x", "web"], { cwd: root, stateRoot })
-    assert.equal(missing.exitCode, 1)
-    assert.match(missing.stderr, /no URL for feature-x\/web/)
-  })
-
-  test("wait rejects invalid timeouts before resolving a command", async () => {
-    const root = await tempDir()
-    try {
-      for (const value of ["0", "-1", "Infinity", "nope"]) {
-        const result = await runCli(["wait", "web", `--timeout=${value}`], { cwd: root })
-        assert.equal(result.exitCode, 1)
-        assert.match(result.stderr, /invalid timeout/)
-      }
-    } finally {
-      await fs.rm(root, { recursive: true, force: true })
-    }
-  })
-
   test("prints curated help without requiring a git repo", async () => {
     const root = await tempDir()
     const result = await runCli(["--help"], { cwd: root })
