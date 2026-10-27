@@ -15,6 +15,7 @@ Core workflow:
   work up feature-x --create
   work run -w feature-x web
   work status
+  work status --json
   work urls feature-x
   work logs -f -w feature-x web
   work restart -w feature-x web

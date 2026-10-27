@@ -227,16 +227,22 @@ Examples:
   work run feature-x web
   work run -w feature-x web`,
 
-  ps: `work ps [-a|--all]
+  ps: `work ps [-a|--all] [--json]
 
 List tracked commands for the current workspace, or all tracked state outside a project.
 
 Usage:
   work ps
   work ps -a
+  work ps --json
 
 Output:
   status    project/workspace    command    pid    url
+
+JSON:
+  --json prints an array of { project, workspace, command, status, pid, url }.
+  pid is a number, url can be null, and status is process up/dead, not HTTP readiness.
+  Empty state is []. Errors stay on stderr with exit code 1.
 
 Status:
   commands show up/dead
@@ -260,16 +266,20 @@ Options:
 Exit:
   ctrl-c`,
 
-  status: `work status [-a|--all]
+  status: `work status [-a|--all] [--json]
 
 List tracked commands for the current workspace, or all tracked state outside a project.
 
 Usage:
   work status
   work status -a
+  work status --json
 
 Output:
   status    project/workspace    command    pid    url
+
+JSON:
+  --json has the same array format as work ps --json.
 
 Empty state:
   no tracked commands`,
@@ -302,13 +312,15 @@ Examples:
 List known URLs for routed commands in a workspace.
 
 Usage:
-  work urls [-p project] [workspace]
+  work urls [-p project] [workspace] [--json]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 Options:
   -p, --project <name>      Filter tracked state by project.
+  --json                   Print an array of { project, workspace, command, url }.
+                           Empty state is []. Errors stay on stderr with exit code 1.
 
 URL shape:
   {command}-{workspace}-{project}.localhost

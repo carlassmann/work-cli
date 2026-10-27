@@ -52,6 +52,16 @@ Routed commands get a stable URL of the form:
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
 
+For scripts and agents, `work ps --json` (also `work status --json`) returns
+an array of `{ project, workspace, command, status, pid, url }`. Process status
+is `up` or `dead`; it does not imply HTTP readiness. `pid` is numeric and `url`
+is a string or `null`. Add `--all` to inspect all tracked workspaces.
+`work urls [workspace] --json` returns routed commands as
+`{ project, workspace, command, url }` objects and supports `-p project`.
+The existing workspace selection rules apply in both modes. Empty results are
+`[]`; errors go to stderr with exit code 1. JSON output excludes stored
+environment variables, command strings, and provider credentials.
+
 ## Install
 
 Not on npm yet — clone and link locally with [Bun](https://bun.sh):
