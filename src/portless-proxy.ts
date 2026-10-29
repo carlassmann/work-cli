@@ -12,12 +12,16 @@ export type PortlessProxyState = "ok" | "stopped" | "foreign"
 // Mirrors how Portless finds its own proxy: PORTLESS_PORT, then the port it recorded.
 export async function portlessPort(environment: NodeJS.ProcessEnv) {
   const fromEnvironment = Number(environment["PORTLESS_PORT"])
-  if (Number.isInteger(fromEnvironment) && fromEnvironment > 0) return fromEnvironment
+  if (isPort(fromEnvironment)) return fromEnvironment
   try {
     const recorded = Number((await fs.readFile(path.join(portlessStateDir(environment), "proxy.port"), "utf8")).trim())
-    if (Number.isInteger(recorded) && recorded > 0) return recorded
+    if (isPort(recorded)) return recorded
   } catch {}
   return 443
+}
+
+function isPort(value: number) {
+  return Number.isInteger(value) && value > 0 && value <= 65_535
 }
 
 // Portless answers every request, even for unknown hosts, with an X-Portless header.
@@ -34,12 +38,13 @@ export async function probePortless(environment: NodeJS.ProcessEnv): Promise<{ s
       servername: "localhost",
       headers: { host: "work-doctor.localhost" },
       rejectUnauthorized: false,
-      timeout: PROBE_TIMEOUT_MS,
     }, (response) => {
       response.resume()
       resolve(response.headers["x-portless"] ? "ok" : "foreign")
     })
-    request.on("timeout", () => request.destroy(new Error("timeout")))
+    // An absolute deadline: a socket timeout resets on every byte, so a server trickling headers would never trip it.
+    const deadline = setTimeout(() => request.destroy(new Error("timeout")), PROBE_TIMEOUT_MS)
+    request.on("close", () => clearTimeout(deadline))
     request.on("error", (cause: NodeJS.ErrnoException) => resolve(cause.code === "ECONNREFUSED" ? "stopped" : "foreign"))
     request.end()
   })

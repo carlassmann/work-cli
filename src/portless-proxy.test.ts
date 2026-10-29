@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
-import { probePortless } from "./portless-proxy.js"
+import { portlessPort, probePortless } from "./portless-proxy.js"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
 
@@ -25,6 +25,34 @@ describe("probePortless", () => {
       portless.server.close()
       other.server.close()
     }
+  })
+
+  test("gives up on a server that trickles its response past the deadline", async () => {
+    const stateDir = await tempDir("portless-state-")
+    const sockets: Array<net.Socket> = []
+    const trickler = net.createServer((socket) => {
+      sockets.push(socket)
+      socket.write("HTTP/1.1 200 OK\r\n")
+      const drip = setInterval(() => socket.write("x-slow: 1\r\n"), 200)
+      socket.on("close", () => clearInterval(drip))
+    })
+    await new Promise<void>((resolve) => trickler.listen(0, "127.0.0.1", resolve))
+    const { port } = trickler.address() as net.AddressInfo
+
+    try {
+      const started = Date.now()
+      assert.deepEqual(await probePortless({ PORTLESS_STATE_DIR: stateDir, PORTLESS_PORT: String(port) }), { state: "foreign", port })
+      assert.ok(Date.now() - started < 4_000)
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      trickler.close()
+    }
+  })
+
+  test("ignores ports outside the valid range", async () => {
+    const stateDir = await tempDir("portless-state-")
+    await fs.writeFile(path.join(stateDir, "proxy.port"), "70000\n")
+    assert.equal(await portlessPort({ PORTLESS_STATE_DIR: stateDir, PORTLESS_PORT: "65536" }), 443)
   })
 
   test("reads the port Portless recorded when PORTLESS_PORT is unset", async () => {
