@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import { spawn } from "node:child_process"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
@@ -387,10 +388,13 @@ describe("cli", () => {
     assert.ok(!result.stdout.includes("api"))
   })
 
-  test("ps and urls --json print public command fields only", async () => {
+  test("ps and urls --json print public command fields only", async (t) => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
-    const pid = process.pid
+    // A fresh process, so its start time matches startedAt however long the suite has run.
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" })
+    t.after(() => sleeper.kill())
+    const pid = sleeper.pid!
     const startedAt = new Date().toISOString()
 
     await initGitRepo(root)
