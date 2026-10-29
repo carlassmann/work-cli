@@ -183,7 +183,8 @@ Examples:
   wait: `work wait
 
 Wait until a tracked command's URL answers with HTTP 2xx or 3xx.
-Redirects are not followed. Prints the URL once it answers.
+Redirects are not followed. Prints the URL once it answers. With --tailscale it
+checks the local URL, since this machine cannot reach its own tailnet URL.
 
 Usage:
   work wait [-p project] [-w workspace] <id> [--timeout seconds]

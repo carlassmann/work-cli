@@ -771,7 +771,9 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
     // workd restarts on-exit commands itself, so a dead pid may be replaced shortly.
     return tracked.restart === "on-exit" || await commandRuntimeStatus(tracked) === "up"
   }
-  const ready = await waitForUrl(record.url, timeout * 1_000, isAlive)
+  // A tailnet URL resolves to this machine's tailnet address, which only other devices reach.
+  const probeUrl = record.exposure?.mode === "tailscale" ? record.localUrl ?? record.url : record.url
+  const ready = await waitForUrl(probeUrl, timeout * 1_000, isAlive)
   if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. Logs: work logs -p ${project} -w ${workspace} ${command}`)
   console.log(record.url)
   return ok(undefined)
