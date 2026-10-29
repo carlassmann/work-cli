@@ -487,13 +487,13 @@ async function restartTracked(target: { project: string; workspace: string; comm
 }
 
 async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { all: booleanFlag("a") } })
+  const parsed = parseArgs(args, { flags: { all: booleanFlag("a"), json: booleanFlag() } })
   if (!parsed.ok) return parsed
   if (parsed.value.positional.length > 0) {
     return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
   }
 
-  const table = await trackedCommandTable(parsed.value.flags.all)
+  const table = await trackedCommandTable(parsed.value.flags.all, parsed.value.flags.json)
   if (!table.ok) return table
 
   console.log(table.value)
@@ -539,23 +539,30 @@ async function runWatch(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function trackedCommandTable(all: boolean): Promise<Result<string>> {
+async function trackedCommandTable(all: boolean, json = false): Promise<Result<string>> {
   const statesResult = all ? ok(await listWorkspaceStates()) : await currentWorkspaceStates()
   if (!statesResult.ok) return statesResult
 
-  const rows: Array<Array<string>> = []
-
+  const records = []
   for (const state of statesResult.value) {
     for (const command of Object.values(state.commands)) {
-      const status = await commandRuntimeStatus(command)
-      rows.push([status, `${state.project}/${state.workspace}`, command.id, String(command.pid), command.url ?? ""])
+      records.push({
+        project: state.project,
+        workspace: state.workspace,
+        command: command.id,
+        status: await commandRuntimeStatus(command),
+        pid: command.pid,
+        url: command.url ?? null,
+      })
     }
   }
 
-  if (rows.length === 0) {
+  if (json) return ok(JSON.stringify(records))
+  if (records.length === 0) {
     return ok("no tracked commands")
   }
 
+  const rows = records.map((record) => [record.status, `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
   return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
 }
 
@@ -651,7 +658,7 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { project: valueFlag("p") } })
+  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), json: booleanFlag() } })
   if (!parsed.ok) return parsed
 
   const workspaceArg = parsed.value.positional[0]
@@ -661,6 +668,10 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!ctx.ok || parsed.value.flags.project) {
     const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
     if (!states.ok) return states
+    if (parsed.value.flags.json) {
+      console.log(urlsJson(states.value))
+      return ok(undefined)
+    }
 
     const rows = states.value.flatMap((state) =>
       Object.values(state.commands)
@@ -680,6 +691,10 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
   const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
   if (!stateResult.ok) return stateResult
+  if (parsed.value.flags.json) {
+    console.log(urlsJson(stateResult.value ? [stateResult.value] : []))
+    return ok(undefined)
+  }
   const rows: Array<Array<string>> = []
 
   for (const command of Object.values(stateResult.value?.commands ?? {})) {
@@ -695,6 +710,12 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   return ok(undefined)
+}
+
+function urlsJson(states: Array<WorkspaceState>): string {
+  return JSON.stringify(states.flatMap((state) => Object.values(state.commands)
+    .filter((command) => command.url)
+    .map((command) => ({ project: state.project, workspace: state.workspace, command: command.id, url: command.url }))))
 }
 
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {

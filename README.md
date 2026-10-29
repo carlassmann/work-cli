@@ -223,6 +223,10 @@ work urls         # routed URLs for the current workspace
 work doctor       # diagnose anything broken
 ```
 
+For scripts and agents, `work ps --json` (or `status --json`) and `work urls --json`
+print arrays of `{ project, workspace, command, ... }` objects. They leave out stored
+environments and credentials, and print `[]` when nothing matches.
+
 ### Adopting a worktree created by another tool
 
 If a worktree already exists — created by `git worktree add` directly, Codex, Claude Code, or anything else — `cd` into it and let `work` derive everything from the current branch:

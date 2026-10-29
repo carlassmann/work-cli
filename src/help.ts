@@ -227,7 +227,7 @@ Examples:
   work run feature-x web
   work run -w feature-x web`,
 
-  ps: `work ps [-a|--all]
+  ps: `work ps [-a|--all] [--json]
 
 List tracked commands for the current workspace, or all tracked state outside a project.
 
@@ -260,7 +260,7 @@ Options:
 Exit:
   ctrl-c`,
 
-  status: `work status [-a|--all]
+  status: `work status [-a|--all] [--json]
 
 List tracked commands for the current workspace, or all tracked state outside a project.
 
@@ -302,7 +302,7 @@ Examples:
 List known URLs for routed commands in a workspace.
 
 Usage:
-  work urls [-p project] [workspace]
+  work urls [-p project] [workspace] [--json]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
