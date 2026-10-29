@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
+import net from "node:net"
 import path from "node:path"
 import { callDaemon, daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
-import { readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { daemonPidFile, daemonSocketFile, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { commandRuntimeStatus } from "./processes.js"
 import { isPidRunning } from "./shell.js"
 import { tempDir } from "./test-helpers.js"
@@ -209,6 +210,22 @@ describe("daemon client", () => {
 
     await stopDaemon()
     assert.equal((await daemonStatus()).running, false)
+  })
+
+  test("reports a workd from an older build as outdated, not stopped", async () => {
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const oldWorkd = net.createServer((socket) => {
+      socket.end(`${JSON.stringify({ ok: false, tag: "DaemonError", error: "daemon protocol version mismatch: client=99, server=1. Restart workd or upgrade the CLI." })}\n`)
+    })
+    await new Promise<void>((resolve) => oldWorkd.listen(daemonSocketFile(), resolve))
+    await fs.writeFile(daemonPidFile(), `${process.pid}\n`)
+
+    try {
+      assert.deepEqual(await daemonStatus(), { running: false, pid: process.pid, outdated: true })
+    } finally {
+      // Bun's close callback waits on the already-ended socket; nothing else listens here.
+      oldWorkd.close()
+    }
   })
 
   test("stopping the daemon preserves commands in every workspace", async () => {

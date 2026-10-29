@@ -1,0 +1,56 @@
+import fs from "node:fs/promises"
+import http from "node:http"
+import https from "node:https"
+import os from "node:os"
+import path from "node:path"
+import { existsAt, resolveHome } from "./shell.js"
+
+const PROBE_TIMEOUT_MS = 2_000
+
+export type PortlessProxyState = "ok" | "stopped" | "foreign"
+
+// Mirrors how Portless finds its own proxy: PORTLESS_PORT, then the port it recorded.
+export async function portlessPort(environment: NodeJS.ProcessEnv) {
+  const fromEnvironment = Number(environment["PORTLESS_PORT"])
+  if (Number.isInteger(fromEnvironment) && fromEnvironment > 0) return fromEnvironment
+  try {
+    const recorded = Number((await fs.readFile(path.join(portlessStateDir(environment), "proxy.port"), "utf8")).trim())
+    if (Number.isInteger(recorded) && recorded > 0) return recorded
+  } catch {}
+  return 443
+}
+
+// Portless answers every request, even for unknown hosts, with an X-Portless header.
+// Anything else on its port means another proxy took it, and routed URLs never reach Portless.
+export async function probePortless(environment: NodeJS.ProcessEnv): Promise<{ state: PortlessProxyState; port: number }> {
+  const port = await portlessPort(environment)
+  const client = await portlessUsesTls(environment) ? https : http
+  const state = await new Promise<PortlessProxyState>((resolve) => {
+    const request = client.request({
+      host: "127.0.0.1",
+      port,
+      method: "HEAD",
+      path: "/",
+      servername: "localhost",
+      headers: { host: "work-doctor.localhost" },
+      rejectUnauthorized: false,
+      timeout: PROBE_TIMEOUT_MS,
+    }, (response) => {
+      response.resume()
+      resolve(response.headers["x-portless"] ? "ok" : "foreign")
+    })
+    request.on("timeout", () => request.destroy(new Error("timeout")))
+    request.on("error", (cause: NodeJS.ErrnoException) => resolve(cause.code === "ECONNREFUSED" ? "stopped" : "foreign"))
+    request.end()
+  })
+  return { state, port }
+}
+
+function portlessStateDir(environment: NodeJS.ProcessEnv) {
+  return environment["PORTLESS_STATE_DIR"] ? resolveHome(environment["PORTLESS_STATE_DIR"]) : path.join(os.homedir(), ".portless")
+}
+
+// Portless marks an HTTPS proxy by the presence of proxy.tls.
+async function portlessUsesTls(environment: NodeJS.ProcessEnv) {
+  return existsAt(path.join(portlessStateDir(environment), "proxy.tls"))
+}

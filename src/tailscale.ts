@@ -1,6 +1,5 @@
 import fs from "node:fs"
 import fsp from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 import { execFile, spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
@@ -9,8 +8,9 @@ import { promisify } from "node:util"
 import { globalConfigDir, readGlobalConfig } from "./config.js"
 import { childEnvironment } from "./environment.js"
 import { dnsLabel } from "./names.js"
+import { portlessPort } from "./portless-proxy.js"
 import { errResult, ok } from "./result.js"
-import { commandExists, isPidRunning, isTrackedPidRunning, processCommand } from "./shell.js"
+import { commandExists, isPidRunning, isTrackedPidRunning, processCommand, resolveHome } from "./shell.js"
 import { listWorkspaceStates, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { CommandRecord, Exposure } from "./types.js"
@@ -332,18 +332,6 @@ async function writeConfig(config: TailnetProxyConfig): Promise<Result<void>> {
   }
 }
 
-// Mirrors how Portless finds its own proxy: PORTLESS_PORT, then the port it recorded.
-async function portlessPort(environment: NodeJS.ProcessEnv) {
-  const fromEnvironment = Number(environment["PORTLESS_PORT"])
-  if (Number.isInteger(fromEnvironment) && fromEnvironment > 0) return fromEnvironment
-  const stateDir = environment["PORTLESS_STATE_DIR"] ? resolveHome(environment["PORTLESS_STATE_DIR"]) : path.join(os.homedir(), ".portless")
-  try {
-    const recorded = Number((await fsp.readFile(path.join(stateDir, "proxy.port"), "utf8")).trim())
-    if (Number.isInteger(recorded) && recorded > 0) return recorded
-  } catch {}
-  return 443
-}
-
 function urlHostname(url: string | null) {
   if (!url) return null
   try {
@@ -377,10 +365,4 @@ function commandError(cause: unknown) {
   if (!cause || typeof cause !== "object") return String(cause)
   const error = cause as { stderr?: string; message?: string }
   return error.stderr?.trim() || error.message || "unknown error"
-}
-
-function resolveHome(file: string) {
-  if (file === "~") return os.homedir()
-  if (file.startsWith("~/")) return path.join(os.homedir(), file.slice(2))
-  return path.resolve(file)
 }

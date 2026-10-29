@@ -1,4 +1,6 @@
 import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { appError, debugLog, describe, err, ok } from "./result.js"
@@ -89,4 +91,10 @@ async function psValue(pid: number, field: string, environment: NodeJS.ProcessEn
     } catch {}
   }
   return null
+}
+
+export function resolveHome(file: string) {
+  if (file === "~") return os.homedir()
+  if (file.startsWith("~/")) return path.join(os.homedir(), file.slice(2))
+  return path.resolve(file)
 }

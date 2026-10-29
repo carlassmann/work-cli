@@ -14,16 +14,20 @@ const DAEMON_START_TIMEOUT_MS = 3000
 const SEND_TIMEOUT_MS = 120_000
 const PING_INTERVAL_MS = 50
 
-export type DaemonStatus = { running: boolean; pid: number | null }
+// outdated: a workd from an older build still runs and rejects this CLI's protocol.
+// The next command that needs workd replaces it; commands keep running meanwhile.
+export type DaemonStatus = { running: boolean; pid: number | null; outdated: boolean }
 
 export async function daemonStatus(): Promise<DaemonStatus> {
   const ping = await sendDaemon({ type: "ping" })
 
   if (ping.ok) {
-    return { running: true, pid: ping.value.data.pid }
+    return { running: true, pid: ping.value.data.pid, outdated: false }
   }
 
-  return { running: false, pid: await readDaemonPid() }
+  const pid = await readDaemonPid()
+  const outdated = pid !== null && isPidRunning(pid) && ping.error.message.startsWith("daemon protocol version mismatch")
+  return { running: false, pid, outdated }
 }
 
 export async function callDaemon<T extends DaemonCommand>(

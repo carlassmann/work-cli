@@ -7,7 +7,7 @@ import { promisify } from "node:util"
 import { childEnvironment } from "./environment.js"
 import { exposureLabel, slugify } from "./names.js"
 import { errResult, ok } from "./result.js"
-import { commandExists, isPidRunning, isTrackedPidRunning, processCommand } from "./shell.js"
+import { commandExists, isPidRunning, isTrackedPidRunning, processCommand, resolveHome } from "./shell.js"
 import { listWorkspaceStates, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { CommandRecord, Exposure } from "./types.js"
@@ -380,10 +380,4 @@ function commandError(cause: unknown) {
   if (!cause || typeof cause !== "object") return String(cause)
   const error = cause as { stderr?: string; message?: string }
   return error.stderr?.trim() || error.message || "unknown error"
-}
-
-function resolveHome(file: string) {
-  if (file === "~") return os.homedir()
-  if (file.startsWith("~/")) return path.join(os.homedir(), file.slice(2))
-  return path.resolve(file)
 }
