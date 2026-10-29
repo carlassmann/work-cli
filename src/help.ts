@@ -43,6 +43,17 @@ Run:
   work <command> --help
   work docs`,
 
+  updates: `work updates
+
+Show the cached update status for this build. Does not contact the network or start workd.
+
+Usage:
+  work updates
+
+workd checks main in the background at startup and hourly. Start it with work daemon start.
+WORK_NO_UPDATE_CHECK=1 disables background checks.
+work --version shows the commit baked into the installed build.`,
+
   init: `work init
 
 Create work.config.js in the current git root or current directory.

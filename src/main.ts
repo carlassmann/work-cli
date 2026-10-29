@@ -9,6 +9,7 @@ import { stdin as input, stdout as output } from "node:process"
 import { cloudflareExposure } from "./cloudflare.js"
 import { tailscaleExposure } from "./tailscale.js"
 import { runTailscaleSetup, tailscaleDoctorLine } from "./tailscale-setup.js"
+import { buildCommit, buildDirty } from "./build-info.js"
 import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
@@ -25,6 +26,7 @@ import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
+import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
 import type { Result } from "./result.js"
 import type { CommandName } from "./commands.js"
 import type { DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
@@ -65,7 +67,7 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   if (args[0] === "--version" || args[0] === "-v") {
     const { version } = createRequire(import.meta.url)("../package.json") as { version: string }
-    console.log(`work ${version}`)
+    console.log(`work ${version}${buildCommit ? ` (${buildCommit.slice(0, 7)}${buildDirty ? "-dirty" : ""})` : " (commit unknown)"}`)
     return ok(undefined)
   }
 
@@ -137,6 +139,7 @@ function commandHandlers(): Record<Exclude<CommandName, "help">, CommandHandler>
     doctor: runDoctor,
     prune: runPrune,
     daemon: runDaemon,
+    updates: runUpdates,
     docs: runDocs,
     completions: runCompletions,
     "shell-init": runShellInit,
@@ -896,6 +899,16 @@ async function runPrune(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const count = response.value.data
   console.log(`pruned ${count} dead command${count === 1 ? "" : "s"}`)
+  return ok(undefined)
+}
+
+async function runUpdates(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args)
+  if (!parsed.ok) return parsed
+  const extra = unexpectedPositional(parsed.value.positional, 0)
+  if (extra) return extra
+  if (buildCommit) console.log(`installed build: ${buildCommit.slice(0, 7)}${buildDirty ? "-dirty" : ""}`)
+  console.log(formatUpdateStatus(await readUpdateStatus()))
   return ok(undefined)
 }
 

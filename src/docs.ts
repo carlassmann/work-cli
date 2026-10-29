@@ -202,6 +202,18 @@ maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS limits command li
 stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
 Prune preserves records for supervised commands so their deadlines remain intact.
 
+Update checks:
+  work --version   version and commit stamped at build time; -dirty means local changes
+  work updates     read cached status without network access or daemon startup
+workd checks GitHub main in the background at startup and hourly. Checks never
+block command supervision. Normal commands do no update-related I/O.
+Cache: ~/.work-cli/updates.json, or $WORK_STATE_ROOT/updates.json.
+Status includes the last successful check time; failures retain that result.
+Checks time out after five seconds per request and retry after an hour.
+Restart workd after rebuilding to load new build metadata.
+WORK_NO_UPDATE_CHECK=1 disables checks. Builds with unknown commits skip checks.
+work reports updates but does not install them.
+
 The daemon communicates over a Unix socket in ~/.work-cli.
 Logs and state remain file-based so they are inspectable.`,
 

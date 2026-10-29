@@ -246,6 +246,24 @@ TTL requires a running daemon.
 
 <!-- written with gpt-6 in codex -->
 
+`bun run build` stamps the Git commit into the CLI. `work --version` shows it;
+`-dirty` means the build includes uncommitted changes. Builds without Git metadata
+show an unknown commit and skip update checks.
+
+workd checks GitHub's `main` at startup and hourly, without blocking process
+supervision or daemon startup. `work updates` reads the result from
+`~/.work-cli/updates.json` and shows when it was checked. Normal commands do no
+update-related disk or network I/O. Checks time out after five seconds per request;
+failed checks retain the last successful result and retry after an hour. A recent
+attempt also suppresses another check after a daemon restart. Cache entries belong
+to the installed commit, so another build cannot reuse an old "up to date" result.
+
+Start workd with `work daemon start` to enable checks. Stop/start it after rebuilding
+to load the new build. `WORK_NO_UPDATE_CHECK=1` disables checks when workd starts.
+Checks report available updates; they do not install them.
+
+<!-- written with gpt-6 in codex -->
+
 Day in the life:
 
 ```sh

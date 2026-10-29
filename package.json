@@ -35,7 +35,7 @@
     "node": ">=20.12"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-build-info.mjs",
     "dev": "bun src/main.ts",
     "check": "bun run typecheck && bun run lint && bun run knip",
     "knip": "knip",
