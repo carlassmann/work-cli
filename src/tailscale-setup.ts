@@ -7,6 +7,7 @@ import type { KeyObject } from "node:crypto"
 import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { readGlobalConfig, updateGlobalConfig } from "./config.js"
+import { acmeManagesCertificate, renewalScheduled, scheduleRenewal } from "./certificate-renewal.js"
 import { childEnvironment } from "./environment.js"
 import { errResult, ok } from "./result.js"
 import { commandExists } from "./shell.js"
@@ -76,6 +77,12 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
       const issued = zone.value ? await issueCertificate(domain, zone.value, options) : manualCertificate(domain, options)
       if (!issued.ok) return issued
     }
+  }
+
+  // A rerun with a valid certificate still repairs renewal, which an earlier run may have failed to schedule.
+  if (certificateReady && await acmeManagesCertificate(domain) && !await renewalScheduled(environment)) {
+    const acme = await installedAcmeSh(environment)
+    if (acme) log(renewalLine(await scheduleRenewal(acme, environment, (args) => run(acme, args, childEnvironment(environment), ACME_TIMEOUT_MS))))
   }
 
   const stored = await updateGlobalConfig({ tailscale: { domain } }, environment)
@@ -298,17 +305,26 @@ async function issueCertificate(domain: string, zone: CloudflareZone, options: S
   const installed = await run(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment, ACME_TIMEOUT_MS)
   if (installed.code !== 0) return errResult("ProcessError", `acme.sh could not install the certificate:\n${lastLines(installed.output)}`)
 
-  const cron = await run(acme.value, ["--install-cronjob"], acmeEnvironment, ACME_TIMEOUT_MS)
   const status = await certificateStatus(paths, domain)
   if (status.state !== "valid") return errResult("ProcessError", `the installed certificate is unusable (${status.state === "invalid" ? status.reason : "missing"})`)
-  log(`✓ Certificate: valid until ${status.expiresAt.toISOString().slice(0, 10)}. ${cron.code === 0 ? "acme.sh renews it automatically." : "Set up renewal with: acme.sh --install-cronjob"}`)
+  log(`✓ Certificate: valid until ${status.expiresAt.toISOString().slice(0, 10)}.`)
+  log(renewalLine(await scheduleRenewal(acme.value, environment, (args) => run(acme.value, args, acmeEnvironment, ACME_TIMEOUT_MS))))
   return ok(undefined)
 }
 
-async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts, log: (line: string) => void): Promise<Result<string>> {
-  if (await commandExists("acme.sh", environment)) return ok("acme.sh")
+function renewalLine(renewal: Result<string>) {
+  return renewal.ok ? `✓ Renewal: ${renewal.value}` : `• Renewal: not scheduled. ${renewal.error.message}\n  Run work tailscale setup again to retry.`
+}
+
+async function installedAcmeSh(environment: NodeJS.ProcessEnv): Promise<string | null> {
+  if (await commandExists("acme.sh", environment)) return "acme.sh"
   const home = path.join(os.homedir(), ".acme.sh", "acme.sh")
-  if (await fs.access(home).then(() => true, () => false)) return ok(home)
+  return await fs.access(home).then(() => true, () => false) ? home : null
+}
+
+async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts, log: (line: string) => void): Promise<Result<string>> {
+  const installed = await installedAcmeSh(environment)
+  if (installed) return ok(installed)
 
   if (await commandExists("brew", environment) && await prompts.confirm("  acme.sh issues the certificate. Install it with Homebrew now?")) {
     log("  Installing acme.sh…")
@@ -321,12 +337,18 @@ async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts,
 
 function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv, timeoutMs: number) {
   return new Promise<{ code: number; output: string }>((resolve) => {
-    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] })
+    // Its own process group, so a timeout also stops grandchildren that hold the output pipes open.
+    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"], detached: true })
     let output = ""
+    const stop = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal)
+      } catch {}
+    }
     const timer = setTimeout(() => {
       output += `\n${command} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`
-      child.kill("SIGTERM")
-      setTimeout(() => child.kill("SIGKILL"), 5_000).unref()
+      stop("SIGTERM")
+      setTimeout(() => stop("SIGKILL"), 5_000).unref()
     }, timeoutMs)
     child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString() })
     child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString() })
