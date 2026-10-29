@@ -153,7 +153,8 @@ address, gets a Let's Encrypt certificate with [acme.sh](https://github.com/acme
 (offering to install it with Homebrew), and saves the domain in
 `~/.config/work/config.json`. With Cloudflare DNS it does all of this itself
 with an API token scoped to "Edit zone DNS" on that zone; with other providers
-it prints the record and the certificate command. Running it again only redoes
+it prints the record and the certificate command. It also offers to let Portless
+serve the domain on this machine (see below). Running it again only redoes
 what is missing or about to expire, and `work doctor` reports both.
 
 To configure it by hand instead, put these in a gitignored `.env.local`:
@@ -173,8 +174,18 @@ certificate files are picked up automatically. When the last Tailscale command
 stops, `work` stops the proxy and removes the port 443 forward.
 
 `WORK_URL` and the other `WORK_*_URL` variables use the tailnet URLs, as with
-Cloudflare. On the machine itself, keep using `*.localhost`: the domain resolves
-to its own tailnet address, where Portless answers instead. Like Cloudflare mode,
+Cloudflare. The domain resolves to the machine's own tailnet address, which
+`tailscale serve` answers only for other devices. So that the same URLs open on the
+machine itself, `work tailscale setup` offers to reinstall the Portless service
+with the domain as a second TLD (Portless 0.15.1 or newer):
+
+```sh
+portless service install --tld localhost --tld dev.example.com
+```
+
+Portless then registers `{command}-{workspace}-{project}.dev.example.com` next to
+the `.localhost` name and points it at `127.0.0.1` in `/etc/hosts`. Without it,
+use the `*.localhost` URLs on the machine itself. Like Cloudflare mode,
 the workspace keeps Tailscale mode for later `run`, `restart`, and `up` calls;
 run `work down` before switching back. In WorkOS or another OAuth provider, allow
 `https://*.dev.example.com` and the callback path.

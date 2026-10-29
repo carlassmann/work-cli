@@ -344,7 +344,8 @@ One-time machine setup, guided:
 
 It points a wildcard DNS record *.dev.example.com at this machine's Tailscale
 IPv4 address (automatic on Cloudflare DNS), gets a Let's Encrypt certificate
-with acme.sh, and saves the domain in ~/.config/work/config.json.
+with acme.sh, offers to let Portless serve the domain on this machine too, and
+saves the domain in ~/.config/work/config.json.
 
 Manual alternative or overrides, in a gitignored .env.local:
   WORK_TAILSCALE_DOMAIN  wildcard domain, such as dev.example.com
@@ -363,8 +364,14 @@ the public origin. When the last Tailscale command stops, work stops the proxy
 and removes the port 443 forward.
 
 WORK_URL and the other WORK_*_URL variables use the tailnet URLs, like
---cloudflare. On this machine itself, keep using the *.localhost URLs: the
-domain resolves to this machine's tailnet address, where Portless answers.
+--cloudflare. The domain resolves to this machine's tailnet address, which
+tailscale serve answers only for other devices. work tailscale setup offers to
+let Portless (0.15.1 or newer) serve the domain here too:
+  portless service install --tld localhost --tld dev.example.com
+Portless then maps each name to 127.0.0.1 in /etc/hosts, so the same URLs open
+on this machine. Portless must listen on 443; when its service has other custom
+settings, setup prints the command instead of running it. Without it, use the
+*.localhost URLs here.
 
 An active Tailscale workspace keeps that mode for later work run, restart, and
 up calls. Run work down before switching it back to local mode.

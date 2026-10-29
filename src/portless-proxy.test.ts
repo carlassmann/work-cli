@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
-import { portlessPort, probePortless } from "./portless-proxy.js"
+import { portlessPort, portlessTlds, probePortless, serviceCustomization } from "./portless-proxy.js"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
 
@@ -64,6 +64,19 @@ describe("probePortless", () => {
   })
 })
 
+describe("portlessTlds", () => {
+  test("reads every TLD Portless serves, falling back to the single-TLD file and then localhost", async () => {
+    const stateDir = await tempDir("portless-state-")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["localhost"])
+
+    await fs.writeFile(path.join(stateDir, "proxy.tld"), "test\n")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["test"])
+
+    await fs.writeFile(path.join(stateDir, "proxy.tlds"), "localhost\ndev.example.com\n")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["localhost", "dev.example.com"])
+  })
+})
+
 async function listen(handler: https.RequestListener) {
   const server = https.createServer({ cert: certificate, key: privateKey }, handler)
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
@@ -77,3 +90,32 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve))
   return port
 }
+
+describe("serviceCustomization", () => {
+  const defaults = (overrides: Record<string, string> = {}) => Object.entries({
+    "Manager state": "running",
+    Installed: "yes",
+    "Proxy on 443": "responding",
+    HTTPS: "yes",
+    TLDs: ".localhost",
+    "LAN mode": "no",
+    Wildcard: "no",
+    "State directory": "/home/me/.portless",
+    "Service entry": "/Library/LaunchDaemons/sh.portless.proxy.plist",
+    ...overrides,
+  }).map(([key, value]) => `  ${key}: ${value}`).join("\n")
+  const plainEntry = async () => "<string>--https</string>"
+
+  test("accepts a service running with defaults", async () => {
+    assert.equal(await serviceCustomization(`portless service\n${defaults()}`, "/home/me/.portless", plainEntry), null)
+  })
+
+  test("names the setting a reinstall would reset", async () => {
+    assert.equal(await serviceCustomization(defaults({ Installed: "no" }), "/home/me/.portless", plainEntry), "the startup service is not installed")
+    assert.equal(await serviceCustomization(defaults({ HTTPS: "no" }), "/home/me/.portless", plainEntry), "it runs without HTTPS")
+    assert.equal(await serviceCustomization(defaults({ "LAN mode": "yes" }), "/home/me/.portless", plainEntry), "it runs in LAN mode")
+    assert.equal(await serviceCustomization(defaults({ Wildcard: "yes" }), "/home/me/.portless", plainEntry), "it runs with wildcard routing")
+    assert.equal(await serviceCustomization(defaults(), "/other/state", plainEntry), "it uses the state directory /home/me/.portless")
+    assert.equal(await serviceCustomization(defaults(), "/home/me/.portless", async () => "<string>--cert</string>"), "it uses a custom certificate")
+  })
+})

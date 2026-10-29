@@ -10,6 +10,7 @@ import { readGlobalConfig, updateGlobalConfig } from "./config.js"
 import { acmeManagesCertificate, renewalScheduled, scheduleRenewal } from "./certificate-renewal.js"
 import { childEnvironment } from "./environment.js"
 import { errResult, ok } from "./result.js"
+import { portlessPort, portlessServiceCustomization, portlessTlds } from "./portless-proxy.js"
 import { commandExists } from "./shell.js"
 import { certificatePaths, isPreviewDomain, savedTailscaleDomain, tailscaleExposure } from "./tailscale.js"
 import type { Result } from "./result.js"
@@ -84,6 +85,8 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
     const acme = await installedAcmeSh(environment)
     if (acme) log(renewalLine(await scheduleRenewal(acme, environment, (args) => runWithTimeout(acme, args, childEnvironment(environment), ACME_TIMEOUT_MS))))
   }
+
+  await serveDomainOnThisMachine(domain, options)
 
   const stored = await updateGlobalConfig({ tailscale: { domain } }, environment)
   if (!stored.ok) return stored
@@ -316,6 +319,91 @@ function renewalLine(renewal: Result<string>) {
   return renewal.ok ? `✓ Renewal: ${renewal.value}` : `• Renewal: not scheduled. ${renewal.error.message}\n  Run work tailscale setup again to retry.`
 }
 
+// *.<domain> resolves to this machine's tailnet address, and tailscale serve answers only
+// other devices, so this machine's own browser would land on a 404. Portless 0.15.1 serves
+// extra domains given as --tld and maps their names to 127.0.0.1 in /etc/hosts, which makes
+// the same URLs open here too.
+async function serveDomainOnThisMachine(domain: string, options: SetupOptions) {
+  const { environment, prompts, log } = options
+  if (!await commandExists("portless", environment)) return
+  const tlds = await portlessTlds(environment)
+  const port = await portlessPort(environment)
+  const version = await portlessVersion(environment)
+  const customization = tlds.includes(domain) || port !== 443 ? null : await portlessServiceCustomization(environment)
+  const plan = portlessDomainPlan(domain, tlds, port, version, customization)
+  if (plan.state === "ready") {
+    log(`✓ This machine: Portless serves *.${domain} too, so the URLs open here as well.`)
+    return
+  }
+
+  log(`• This machine: *.${domain} points to its tailnet address, which only other devices reach.`)
+  if (plan.state === "port") {
+    log(`  Portless listens on :${port}, but the URLs use :443, so they open only on other devices. Use the *.localhost URLs here.`)
+    return
+  }
+  if (plan.state === "outdated") {
+    log("  Portless 0.15.1 or newer can serve the domain here too. Update it (npm install -g portless@latest) and run work tailscale setup again.")
+    return
+  }
+
+  const command = `portless ${plan.args.join(" ")}`
+  if (plan.state === "manual") {
+    log(`  Portless can serve it here too, but reinstalling its service would reset other settings: ${plan.reason}.`)
+    log(`  Run this with your own options added: ${command}`)
+    return
+  }
+  if (!await prompts.confirm(`  Let Portless serve it here too? This reinstalls its startup service with \`${command}\` and asks for your password.`)) {
+    log(`  To do it later: ${command}`)
+    return
+  }
+  const code = await runInteractive("portless", plan.args, childEnvironment(environment))
+  log(code === 0
+    ? `✓ This machine: Portless serves *.${domain}. Restart running routed commands (work restart --all) so they get the new names.`
+    : `  Portless exited with code ${code}. Run it yourself: ${command}`)
+}
+
+// The names map to 127.0.0.1 without a port, so Portless must listen on 443 for them to open here.
+export function portlessDomainPlan(domain: string, tlds: Array<string>, port: number, version: string | null, customization: string | null):
+  | { state: "ready" }
+  | { state: "port" }
+  | { state: "outdated" }
+  | { state: "manual"; reason: string; args: Array<string> }
+  | { state: "install"; args: Array<string> } {
+  if (port !== 443) return { state: "port" }
+  if (tlds.includes(domain)) return { state: "ready" }
+  if (!version || compareVersions(version, "0.15.1") < 0) return { state: "outdated" }
+  const args = ["service", "install", ...[...tlds, domain].flatMap((tld) => ["--tld", tld])]
+  return customization ? { state: "manual", reason: customization, args } : { state: "install", args }
+}
+
+function compareVersions(left: string, right: string) {
+  const a = left.split(".").map(Number)
+  const b = right.split(".").map(Number)
+  for (let index = 0; index < 3; index++) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+async function portlessVersion(environment: NodeJS.ProcessEnv) {
+  try {
+    const { stdout } = await exec("portless", ["--version"], { env: childEnvironment(environment) })
+    return /\d+\.\d+\.\d+/.exec(stdout)?.[0] ?? null
+  } catch {
+    return null
+  }
+}
+
+// Portless asks for the password itself, so it needs the terminal.
+function runInteractive(command: string, args: Array<string>, env: NodeJS.ProcessEnv) {
+  return new Promise<number>((resolve) => {
+    const child = spawn(command, args, { env, stdio: "inherit" })
+    child.on("error", () => resolve(127))
+    child.on("exit", (code) => resolve(code ?? 1))
+  })
+}
+
 async function installedAcmeSh(environment: NodeJS.ProcessEnv): Promise<string | null> {
   if (await commandExists("acme.sh", environment)) return "acme.sh"
   const home = path.join(os.homedir(), ".acme.sh", "acme.sh")
@@ -378,5 +466,12 @@ export async function tailscaleDoctorLine(environment: NodeJS.ProcessEnv): Promi
   if (!ip.ok) return `tailscale\tmissing\t${ip.error.message}`
   if (!await wildcardResolvesTo(domain, ip.value)) return `tailscale\tdns\t*.${domain} does not point to ${ip.value}. Run: work tailscale setup`
   if (certificate.daysLeft <= 14) return `tailscale\texpiring\tcertificate expires in ${certificate.daysLeft} days. Run: work tailscale setup`
-  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)`
+  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)${await localAccessNote(domain, environment)}`
+}
+
+async function localAccessNote(domain: string, environment: NodeJS.ProcessEnv) {
+  const port = await portlessPort(environment)
+  if (port !== 443) return `; this machine opens the URLs only through *.localhost, because Portless listens on :${port}`
+  if (!(await portlessTlds(environment)).includes(domain)) return `; this machine opens the URLs only after work tailscale setup lets Portless serve ${domain}`
+  return ""
 }
