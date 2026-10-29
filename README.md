@@ -52,10 +52,6 @@ Routed commands get a stable URL of the form:
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
 
-For scripts, use `work ps --json` (or `status --json`) and `work urls --json`.
-They return arrays of public command fields, excluding environments and credentials.
-Empty results are `[]`; workspace selection and error handling are unchanged.
-
 ## Install
 
 Not on npm yet — clone and link locally with [Bun](https://bun.sh):
@@ -226,6 +222,10 @@ work watch -a     # live-refresh everything
 work urls         # routed URLs for the current workspace
 work doctor       # diagnose anything broken
 ```
+
+For scripts and agents, `work ps --json` (or `status --json`) and `work urls --json`
+print arrays of `{ project, workspace, command, ... }` objects. They leave out stored
+environments and credentials, and print `[]` when nothing matches.
 
 ### Adopting a worktree created by another tool
 

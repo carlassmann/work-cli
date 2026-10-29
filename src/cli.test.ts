@@ -350,6 +350,7 @@ describe("cli", () => {
           route: null,
           cwd: root,
           log: path.join(root, "web.log"),
+          url: null,
           startedAt: new Date().toISOString(),
           pid,
         },
@@ -384,18 +385,53 @@ describe("cli", () => {
     assert.ok(result.stdout.includes("web"))
     assert.ok(!result.stdout.includes("tilly/other"))
     assert.ok(!result.stdout.includes("api"))
+  })
 
-    const json = await runCli(["status", "--json"], { cwd: root, stateRoot })
-    assert.equal(json.exitCode, 0)
-    assert.equal(json.stderr, "")
-    const [record] = JSON.parse(json.stdout)
-    assert.equal(JSON.parse(json.stdout).length, 1)
-    assert.deepEqual(Object.keys(record).sort(), ["command", "pid", "project", "status", "url", "workspace"])
-    assert.equal(record.project, "tilly")
-    assert.equal(record.workspace, "main")
-    assert.equal(record.pid, pid)
-    assert.equal(record.url, null)
-    const empty = await runCli(["urls", "--json"], { cwd: root, stateRoot })
+  test("ps and urls --json print public command fields only", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const pid = process.pid
+    const startedAt = new Date().toISOString()
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {},
+    }`)
+    const statePath = path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json")
+    await writeFile(statePath, JSON.stringify({
+      project: "tilly",
+      workspace: "main",
+      branch: "main",
+      root,
+      commands: {
+        web: {
+          id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root,
+          log: path.join(root, "web.log"), url: "https://web-main-tilly.localhost", startedAt, pid,
+          env: { API_TOKEN: "secret" },
+        },
+        worker: {
+          id: "worker", label: "worker", command: "worker", run: "worker", route: null, cwd: root,
+          log: path.join(root, "worker.log"), startedAt, pid,
+        },
+      },
+    }))
+
+    const ps = await runCli(["status", "--json"], { cwd: root, stateRoot })
+    assert.equal(ps.exitCode, 0)
+    assert.equal(ps.stderr, "")
+    assert.deepEqual(JSON.parse(ps.stdout), [
+      { project: "tilly", workspace: "main", command: "web", status: "up", pid, url: "https://web-main-tilly.localhost" },
+      { project: "tilly", workspace: "main", command: "worker", status: "up", pid, url: null },
+    ])
+
+    const urls = await runCli(["urls", "--json"], { cwd: root, stateRoot })
+    assert.equal(urls.exitCode, 0)
+    assert.deepEqual(JSON.parse(urls.stdout), [
+      { project: "tilly", workspace: "main", command: "web", url: "https://web-main-tilly.localhost" },
+    ])
+
+    const empty = await runCli(["urls", "other", "--json"], { cwd: root, stateRoot })
     assert.equal(empty.stdout, "[]\n")
   })
 

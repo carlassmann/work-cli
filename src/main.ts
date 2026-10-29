@@ -543,18 +543,14 @@ async function trackedCommandTable(all: boolean, json = false): Promise<Result<s
   const statesResult = all ? ok(await listWorkspaceStates()) : await currentWorkspaceStates()
   if (!statesResult.ok) return statesResult
 
-  const rows: Array<Array<string>> = []
   const records = []
-
   for (const state of statesResult.value) {
     for (const command of Object.values(state.commands)) {
-      const status = await commandRuntimeStatus(command)
-      rows.push([status, `${state.project}/${state.workspace}`, command.id, String(command.pid), command.url ?? ""])
       records.push({
         project: state.project,
         workspace: state.workspace,
         command: command.id,
-        status,
+        status: await commandRuntimeStatus(command),
         pid: command.pid,
         url: command.url ?? null,
       })
@@ -562,10 +558,11 @@ async function trackedCommandTable(all: boolean, json = false): Promise<Result<s
   }
 
   if (json) return ok(JSON.stringify(records))
-  if (rows.length === 0) {
+  if (records.length === 0) {
     return ok("no tracked commands")
   }
 
+  const rows = records.map((record) => [record.status, `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
   return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
 }
 
