@@ -18,6 +18,7 @@ export const commandSpecs = [
   { name: "logs", summary: "Print or follow command logs.", flags: ["-f", "--follow", "-p", "--project", "-w", "--workspace"] },
   { name: "urls", summary: "List workspace URLs.", flags: ["-p", "--project", "--json"] },
   { name: "stop", summary: "Stop a tracked command.", flags: ["-p", "--project", "-w", "--workspace"] },
+  { name: "wait", summary: "Wait for a command URL to respond.", flags: ["-p", "--project", "-w", "--workspace", "--timeout"] },
   { name: "doctor", summary: "Check project setup.", flags: [] },
   { name: "prune", summary: "Remove dead process records.", flags: [] },
   { name: "daemon", summary: "Manage workd.", flags: [] },

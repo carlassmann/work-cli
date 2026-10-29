@@ -196,7 +196,8 @@ Day in the life:
 # Spin it up — creates ../tilly.worktrees/chat-streaming, runs setup, starts both servers.
 work up chat-streaming --create
 
-# Open the web app. Sync server is already wired up via the env var.
+# Wait until the web app answers, then open it. Sync server is already wired up via the env var.
+work wait chat-streaming web
 open https://web-chat-streaming-tilly.localhost
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.

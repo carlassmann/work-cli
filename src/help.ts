@@ -177,6 +177,27 @@ Examples:
   work stop feature-x web
   work stop -w feature-x web`,
 
+  wait: `work wait
+
+Wait until a tracked command's URL answers with HTTP 2xx or 3xx.
+Redirects are not followed. Prints the URL once it answers.
+
+Usage:
+  work wait [-p project] [-w workspace] <id> [--timeout seconds]
+  work wait [workspace] <id> [--timeout seconds]
+
+Options:
+  -p, --project <name>      Target project when outside a project.
+  -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
+  --timeout <seconds>       Give up after this many seconds. Defaults to 60.
+
+Exit:
+  1 on timeout or when the command stops before it answers.
+
+Examples:
+  work wait web
+  work wait feature-x web --timeout 120`,
+
   restart: `work restart
 
 Stop and start one configured command, or autoStart commands with --all.
