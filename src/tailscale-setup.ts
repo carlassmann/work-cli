@@ -2,7 +2,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Resolver } from "node:dns/promises"
-import { X509Certificate } from "node:crypto"
+import { X509Certificate, createPrivateKey } from "node:crypto"
+import type { KeyObject } from "node:crypto"
 import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { readGlobalConfig, updateGlobalConfig } from "./config.js"
@@ -14,6 +15,9 @@ import type { Result } from "./result.js"
 
 const exec = promisify(execFile)
 const RENEW_BEFORE_DAYS = 30
+const CLOUDFLARE_TIMEOUT_MS = 30_000
+const ACME_TIMEOUT_MS = 5 * 60_000
+const BREW_TIMEOUT_MS = 10 * 60_000
 const CLOUDFLARE_TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens"
 
 type SetupPrompts = {
@@ -48,7 +52,7 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
 
   const paths = certificatePaths(domain, environment)
   const dnsReady = await wildcardResolvesTo(domain, ip.value)
-  const certificate = await certificateStatus(paths.certFile, domain)
+  const certificate = await certificateStatus(paths, domain)
   const certificateReady = certificate.state === "valid" && certificate.daysLeft > RENEW_BEFORE_DAYS
   log(dnsReady ? `✓ DNS: *.${domain} points to ${ip.value}.` : `• DNS: *.${domain} must point to ${ip.value}.`)
   log(certificateReady && certificate.state === "valid"
@@ -106,7 +110,9 @@ async function wildcardResolvesTo(domain: string, ip: string, servers = ["1.1.1.
   const resolver = new Resolver({ timeout: 3_000, tries: 2 })
   resolver.setServers(servers)
   try {
-    return (await resolver.resolve4(`work-check.${domain}`)).includes(ip)
+    // Every address must match: clients pick any of them, and a stray one sends some requests elsewhere.
+    const addresses = await resolver.resolve4(`work-check.${domain}`)
+    return addresses.length > 0 && addresses.every((address) => address === ip)
   } catch {
     return false
   }
@@ -186,17 +192,25 @@ export class CloudflareDns {
     )
     if (!existing.ok) return existing
     const body = { type: "A", name, content: ip, proxied: false, ttl: 1, comment: "work: tailnet previews" }
-    const record = existing.value[0]
-    if (record && record.content === ip && !record.proxied) return ok("Kept")
-    if (record) {
-      if (record.content !== ip && !await confirmReplace(record.content)) {
-        return errResult("CLIError", `left *.${domain} unchanged`)
-      }
-      const updated = await this.request(`/zones/${zoneId}/dns_records/${record.id}`, { method: "PATCH", body })
-      return updated.ok ? ok("Updated") : updated
+    const keep = existing.value.find((record) => record.content === ip) ?? existing.value[0]
+    const others = existing.value.filter((record) => record !== keep)
+    const elsewhere = existing.value.filter((record) => record.content !== ip).map((record) => record.content)
+    if (elsewhere.length > 0 && !await confirmReplace(elsewhere.join(", "))) {
+      return errResult("CLIError", `left *.${domain} unchanged`)
     }
-    const created = await this.request(`/zones/${zoneId}/dns_records`, { method: "POST", body })
-    return created.ok ? ok("Created") : created
+
+    // A wildcard with several A records splits traffic, so only the one pointing here may stay.
+    for (const record of others) {
+      const removed = await this.request(`/zones/${zoneId}/dns_records/${record.id}`, { method: "DELETE" })
+      if (!removed.ok) return removed
+    }
+    if (!keep) {
+      const created = await this.request(`/zones/${zoneId}/dns_records`, { method: "POST", body })
+      return created.ok ? ok("Created") : created
+    }
+    if (keep.content === ip && !keep.proxied) return ok(others.length > 0 ? "Updated" : "Kept")
+    const updated = await this.request(`/zones/${zoneId}/dns_records/${keep.id}`, { method: "PATCH", body })
+    return updated.ok ? ok("Updated") : updated
   }
 
   private async request<T>(route: string, init: { method?: string; body?: unknown } = {}): Promise<Result<T>> {
@@ -205,6 +219,7 @@ export class CloudflareDns {
       response = await this.fetchImpl(`${this.api}${route}`, {
         method: init.method ?? "GET",
         headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
+        signal: AbortSignal.timeout(CLOUDFLARE_TIMEOUT_MS),
         ...(init.body ? { body: JSON.stringify(init.body) } : {}),
       })
     } catch (cause) {
@@ -224,19 +239,35 @@ export type CertificateStatus =
   | { state: "invalid"; reason: string }
   | { state: "valid"; expiresAt: Date; daysLeft: number }
 
-export async function certificateStatus(certFile: string, domain: string, now = new Date()): Promise<CertificateStatus> {
+export async function certificateStatus(
+  paths: { certFile: string; keyFile: string },
+  domain: string,
+  now = new Date(),
+): Promise<CertificateStatus> {
   let certificate: X509Certificate
   try {
-    certificate = new X509Certificate(await fs.readFile(certFile))
+    certificate = new X509Certificate(await fs.readFile(paths.certFile))
   } catch (cause) {
     return (cause as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "invalid", reason: "not a PEM certificate" }
   }
   if (!certificate.subjectAltName?.split(", ").includes(`DNS:*.${domain}`)) {
     return { state: "invalid", reason: `does not cover *.${domain}` }
   }
+  const keyProblem = await privateKeyProblem(certificate, paths.keyFile)
+  if (keyProblem) return { state: "invalid", reason: keyProblem }
   const expiresAt = new Date(certificate.validTo)
   const daysLeft = Math.floor((expiresAt.getTime() - now.getTime()) / 86_400_000)
   return daysLeft < 0 ? { state: "invalid", reason: `expired on ${expiresAt.toISOString().slice(0, 10)}` } : { state: "valid", expiresAt, daysLeft }
+}
+
+async function privateKeyProblem(certificate: X509Certificate, keyFile: string): Promise<string | null> {
+  let key: KeyObject
+  try {
+    key = createPrivateKey(await fs.readFile(keyFile))
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT" ? `has no private key at ${keyFile}` : `has an unreadable private key at ${keyFile}`
+  }
+  return certificate.checkPrivateKey(key) ? null : `does not match the private key at ${keyFile}`
 }
 
 function manualCertificate(domain: string, options: SetupOptions): Result<void> {
@@ -257,18 +288,18 @@ async function issueCertificate(domain: string, zone: CloudflareZone, options: S
 
   log(`  Requesting *.${domain} from Let's Encrypt. This takes about a minute…`)
   const acmeEnvironment = { ...childEnvironment(environment), CF_Token: zone.token, CF_Zone_ID: zone.zoneId }
-  const issued = await run(acme.value, ["--issue", "--server", "letsencrypt", "--dns", "dns_cf", "-d", `*.${domain}`, "--keylength", "ec-256"], acmeEnvironment)
+  const issued = await run(acme.value, ["--issue", "--server", "letsencrypt", "--dns", "dns_cf", "-d", `*.${domain}`, "--keylength", "ec-256"], acmeEnvironment, ACME_TIMEOUT_MS)
   // acme.sh exits with 2 when its copy is still current and it skipped the request.
   if (issued.code !== 0 && issued.code !== 2) {
     return errResult("ProcessError", `acme.sh could not issue the certificate:\n${lastLines(issued.output)}`)
   }
 
-  await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 })
-  const installed = await run(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment)
+  for (const file of [paths.certFile, paths.keyFile]) await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const installed = await run(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment, ACME_TIMEOUT_MS)
   if (installed.code !== 0) return errResult("ProcessError", `acme.sh could not install the certificate:\n${lastLines(installed.output)}`)
 
-  const cron = await run(acme.value, ["--install-cronjob"], acmeEnvironment)
-  const status = await certificateStatus(paths.certFile, domain)
+  const cron = await run(acme.value, ["--install-cronjob"], acmeEnvironment, ACME_TIMEOUT_MS)
+  const status = await certificateStatus(paths, domain)
   if (status.state !== "valid") return errResult("ProcessError", `the installed certificate is unusable (${status.state === "invalid" ? status.reason : "missing"})`)
   log(`✓ Certificate: valid until ${status.expiresAt.toISOString().slice(0, 10)}. ${cron.code === 0 ? "acme.sh renews it automatically." : "Set up renewal with: acme.sh --install-cronjob"}`)
   return ok(undefined)
@@ -281,21 +312,26 @@ async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts,
 
   if (await commandExists("brew", environment) && await prompts.confirm("  acme.sh issues the certificate. Install it with Homebrew now?")) {
     log("  Installing acme.sh…")
-    const installed = await run("brew", ["install", "acme.sh"], childEnvironment(environment))
+    const installed = await run("brew", ["install", "acme.sh"], childEnvironment(environment), BREW_TIMEOUT_MS)
     if (installed.code === 0) return ok("acme.sh")
     return errResult("ProcessError", `brew install acme.sh failed:\n${lastLines(installed.output)}`)
   }
   return errResult("ProcessError", "acme.sh is required to issue the certificate: https://github.com/acmesh-official/acme.sh#1-how-to-install")
 }
 
-function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv) {
+function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv, timeoutMs: number) {
   return new Promise<{ code: number; output: string }>((resolve) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] })
     let output = ""
+    const timer = setTimeout(() => {
+      output += `\n${command} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`
+      child.kill("SIGTERM")
+      setTimeout(() => child.kill("SIGKILL"), 5_000).unref()
+    }, timeoutMs)
     child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString() })
     child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString() })
-    child.on("error", (cause) => resolve({ code: -1, output: cause.message }))
-    child.on("close", (code) => resolve({ code: code ?? -1, output }))
+    child.on("error", (cause) => { clearTimeout(timer); resolve({ code: -1, output: cause.message }) })
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, output }) })
   })
 }
 
@@ -307,9 +343,9 @@ export async function tailscaleDoctorLine(environment: NodeJS.ProcessEnv): Promi
   const exposure = await tailscaleExposure(environment)
   if (!exposure.ok) return `tailscale\tnot configured\t${exposure.error.message}`
   if (exposure.value.mode !== "tailscale") return "tailscale\tnot configured"
-  const { domain, certFile } = exposure.value
+  const { domain, certFile, keyFile } = exposure.value
 
-  const certificate = await certificateStatus(certFile, domain)
+  const certificate = await certificateStatus({ certFile, keyFile }, domain)
   if (certificate.state === "missing") return `tailscale\tmissing\t${certFile}. Run: work tailscale setup`
   if (certificate.state === "invalid") return `tailscale\tinvalid\tcertificate ${certificate.reason}. Run: work tailscale setup`
 
