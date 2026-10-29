@@ -34,6 +34,7 @@ Examples:
   work stop web
   work urls feature-x
   work doctor
+  work tailscale setup
   work daemon status
   work docs portless
   work docs config
@@ -344,6 +345,29 @@ Empty state:
 Examples:
   work urls
   work urls feature-x`,
+
+  tailscale: `work tailscale setup
+
+Set up private HTTPS previews for your other tailnet devices, once per machine.
+
+Usage:
+  work tailscale setup [--domain <domain>] [--yes]
+
+Steps (each is skipped when already done):
+  1. Reads this machine's Tailscale IPv4 address.
+  2. Points *.<domain> at it. On Cloudflare DNS work creates the record with an
+     API token (CLOUDFLARE_API_TOKEN, or asked for); elsewhere it prints the record.
+  3. Gets a Let's Encrypt certificate for *.<domain> with acme.sh (DNS challenge)
+     and installs it under ~/.config/work/tailscale. acme.sh renews it.
+  4. Saves the domain in ~/.config/work/config.json.
+
+Options:
+  --domain <domain>   For example dev.example.com. Defaults to the saved domain.
+  -y, --yes           Answer yes to every question (for scripts).
+
+Afterwards:
+  work up --tailscale
+  work doctor          checks the certificate and the DNS record`,
 
   doctor: `work doctor
 

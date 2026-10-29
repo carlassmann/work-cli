@@ -1,0 +1,321 @@
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { Resolver } from "node:dns/promises"
+import { X509Certificate } from "node:crypto"
+import { execFile, spawn } from "node:child_process"
+import { promisify } from "node:util"
+import { readGlobalConfig, updateGlobalConfig } from "./config.js"
+import { childEnvironment } from "./environment.js"
+import { errResult, ok } from "./result.js"
+import { commandExists } from "./shell.js"
+import { certificatePaths, isPreviewDomain, savedTailscaleDomain, tailscaleExposure } from "./tailscale.js"
+import type { Result } from "./result.js"
+
+const exec = promisify(execFile)
+const RENEW_BEFORE_DAYS = 30
+const CLOUDFLARE_TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens"
+
+type SetupPrompts = {
+  ask(question: string): Promise<string>
+  askSecret(question: string): Promise<string>
+  confirm(question: string): Promise<boolean>
+  waitForEnter(question: string): Promise<void>
+}
+
+type SetupOptions = {
+  domain?: string | undefined
+  environment: NodeJS.ProcessEnv
+  prompts: SetupPrompts
+  log: (line: string) => void
+  fetch?: typeof fetch
+}
+
+export async function runTailscaleSetup(options: SetupOptions): Promise<Result<void>> {
+  const { environment, prompts, log } = options
+
+  const ip = await tailnetIPv4(environment)
+  if (!ip.ok) return ip
+  log(`✓ Tailscale is connected. This machine is ${ip.value} in your tailnet.`)
+
+  const saved = await readGlobalConfig(environment)
+  if (!saved.ok) return saved
+  const savedDomain = savedTailscaleDomain(saved.value)
+  const domain = (options.domain ?? savedDomain ?? await prompts.ask("Domain for previews, for example dev.example.com: ")).trim().toLowerCase()
+  if (!domain) return errResult("CLIError", "no domain given. Pass --domain dev.example.com")
+  if (!isPreviewDomain(domain)) return errResult("CLIError", `not a usable domain: ${domain}`)
+  if (!options.domain && savedDomain) log(`Using the saved domain ${domain}. Pass --domain to change it.`)
+
+  const paths = certificatePaths(domain, environment)
+  const dnsReady = await wildcardResolvesTo(domain, ip.value)
+  const certificate = await certificateStatus(paths.certFile, domain)
+  const certificateReady = certificate.state === "valid" && certificate.daysLeft > RENEW_BEFORE_DAYS
+  log(dnsReady ? `✓ DNS: *.${domain} points to ${ip.value}.` : `• DNS: *.${domain} must point to ${ip.value}.`)
+  log(certificateReady && certificate.state === "valid"
+    ? `✓ Certificate: valid for ${certificate.daysLeft} more days.`
+    : `• Certificate: ${certificate.state === "valid" ? `expires in ${certificate.daysLeft} days` : certificate.state === "missing" ? "none yet" : certificate.reason}.`)
+
+  if (!dnsReady || !certificateReady) {
+    log("")
+    const cloudflare = await prompts.confirm(`Is ${domain} on Cloudflare DNS? Then work sets up ${dnsReady ? "the certificate" : "the record and the certificate"} for you.`)
+    const zone = cloudflare ? await cloudflareZone(domain, options) : ok(null)
+    if (!zone.ok) return zone
+
+    if (!dnsReady) {
+      const dns = zone.value
+        ? await createRecord(zone.value, domain, ip.value, options)
+        : await waitForManualRecord(domain, ip.value, options)
+      if (!dns.ok) return dns
+    }
+
+    if (!certificateReady) {
+      const issued = zone.value ? await issueCertificate(domain, zone.value, options) : manualCertificate(domain, options)
+      if (!issued.ok) return issued
+    }
+  }
+
+  const stored = await updateGlobalConfig({ tailscale: { domain } }, environment)
+  if (!stored.ok) return stored
+
+  log("")
+  log(`✓ Saved. Routed commands will use https://{command}-{workspace}-{project}.${domain}`)
+  log("")
+  log("If the app signs users in with OAuth (for example WorkOS), allow:")
+  log(`  redirect URI   https://*.${domain}/<callback path>`)
+  log(`  web origin     https://*.${domain}`)
+  log("")
+  log("Then, in a project:")
+  log("  work setup --tailscale     # if your setup hook writes URLs into config")
+  log("  work up --tailscale")
+  return ok(undefined)
+}
+
+async function tailnetIPv4(environment: NodeJS.ProcessEnv): Promise<Result<string>> {
+  if (!await commandExists("tailscale", environment)) {
+    return errResult("ProcessError", "the tailscale CLI was not found. Install Tailscale, sign in, and make sure tailscale is on PATH.")
+  }
+  try {
+    const { stdout } = await exec("tailscale", ["ip", "-4"], { env: childEnvironment(environment), timeout: 15_000 })
+    const ip = stdout.trim().split("\n")[0]?.trim()
+    if (ip && /^100\.\d+\.\d+\.\d+$/.test(ip)) return ok(ip)
+  } catch {}
+  return errResult("ProcessError", "Tailscale is not connected. Start Tailscale, sign in, then run this again.")
+}
+
+async function wildcardResolvesTo(domain: string, ip: string, servers = ["1.1.1.1", "8.8.8.8"]) {
+  const resolver = new Resolver({ timeout: 3_000, tries: 2 })
+  resolver.setServers(servers)
+  try {
+    return (await resolver.resolve4(`work-check.${domain}`)).includes(ip)
+  } catch {
+    return false
+  }
+}
+
+type CloudflareZone = { token: string; zoneId: string; dns: CloudflareDns }
+
+async function cloudflareZone(domain: string, options: SetupOptions): Promise<Result<CloudflareZone>> {
+  let token = options.environment["CLOUDFLARE_API_TOKEN"] || options.environment["CF_Token"]
+  if (!token) {
+    options.log(`  Create a token at ${CLOUDFLARE_TOKEN_URL}`)
+    options.log(`  Template "Edit zone DNS", Zone Resources: Include → Specific zone → the zone of ${domain}.`)
+    token = (await options.prompts.askSecret("  Paste the token (input is hidden): ")).trim()
+  }
+  if (!token) return errResult("CLIError", "no Cloudflare token given")
+  const dns = new CloudflareDns(token, options.fetch ?? fetch)
+  const zone = await dns.findZone(domain)
+  return zone.ok ? ok({ token, zoneId: zone.value, dns }) : zone
+}
+
+async function createRecord(zone: CloudflareZone, domain: string, ip: string, options: SetupOptions): Promise<Result<void>> {
+  const record = await zone.dns.upsertWildcard(zone.zoneId, domain, ip, (current) =>
+    options.prompts.confirm(`  *.${domain} currently points to ${current}. Replace it with ${ip}?`))
+  if (!record.ok) return record
+  options.log(`✓ DNS: ${record.value} *.${domain} → ${ip} (DNS only).`)
+  return ok(undefined)
+}
+
+async function waitForManualRecord(domain: string, ip: string, options: SetupOptions): Promise<Result<void>> {
+  options.log("  Add this record at your DNS provider:")
+  options.log(`    Type A   Name *.${domain}   Value ${ip}   (no proxy / DNS only)`)
+  await options.prompts.waitForEnter("  Press Enter once it is saved…")
+  if (!await waitForResolution(domain, ip)) {
+    return errResult("ProcessError", `*.${domain} does not resolve to ${ip} yet. DNS can take a few minutes; run work tailscale setup again.`)
+  }
+  options.log("✓ DNS resolves.")
+  return ok(undefined)
+}
+
+async function waitForResolution(domain: string, ip: string) {
+  for (let attempt = 0; attempt < 24; attempt++) {
+    if (await wildcardResolvesTo(domain, ip)) return true
+    await new Promise((resolve) => setTimeout(resolve, 5_000))
+  }
+  return false
+}
+
+export class CloudflareDns {
+  constructor(
+    private readonly token: string,
+    private readonly fetchImpl: typeof fetch,
+    private readonly api = "https://api.cloudflare.com/client/v4",
+  ) {}
+
+  // The zone is the longest suffix of the domain that Cloudflare knows.
+  async findZone(domain: string): Promise<Result<string>> {
+    const labels = domain.split(".")
+    for (let index = 0; index < labels.length - 1; index++) {
+      const name = labels.slice(index).join(".")
+      const zones = await this.request<Array<{ id: string }>>(`/zones?name=${encodeURIComponent(name)}`)
+      if (!zones.ok) return zones
+      const zone = zones.value[0]
+      if (zone) return ok(zone.id)
+    }
+    return errResult("ConfigError", `the token cannot see a Cloudflare zone for ${domain}. Give it Zone → DNS → Edit on that zone.`)
+  }
+
+  async upsertWildcard(
+    zoneId: string,
+    domain: string,
+    ip: string,
+    confirmReplace: (current: string) => Promise<boolean>,
+  ): Promise<Result<"Created" | "Updated" | "Kept">> {
+    const name = `*.${domain}`
+    const existing = await this.request<Array<{ id: string; content: string; proxied: boolean }>>(
+      `/zones/${zoneId}/dns_records?type=A&name=${encodeURIComponent(name)}`,
+    )
+    if (!existing.ok) return existing
+    const body = { type: "A", name, content: ip, proxied: false, ttl: 1, comment: "work: tailnet previews" }
+    const record = existing.value[0]
+    if (record && record.content === ip && !record.proxied) return ok("Kept")
+    if (record) {
+      if (record.content !== ip && !await confirmReplace(record.content)) {
+        return errResult("CLIError", `left *.${domain} unchanged`)
+      }
+      const updated = await this.request(`/zones/${zoneId}/dns_records/${record.id}`, { method: "PATCH", body })
+      return updated.ok ? ok("Updated") : updated
+    }
+    const created = await this.request(`/zones/${zoneId}/dns_records`, { method: "POST", body })
+    return created.ok ? ok("Created") : created
+  }
+
+  private async request<T>(route: string, init: { method?: string; body?: unknown } = {}): Promise<Result<T>> {
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.api}${route}`, {
+        method: init.method ?? "GET",
+        headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
+        ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+      })
+    } catch (cause) {
+      return errResult("ProcessError", "could not reach the Cloudflare API", cause)
+    }
+    const payload = await response.json().catch(() => null) as { success?: boolean; result?: T; errors?: Array<{ message?: string }> } | null
+    if (!response.ok || !payload?.success) {
+      const message = payload?.errors?.map((error) => error.message).filter(Boolean).join("; ") || `HTTP ${response.status}`
+      return errResult("ProcessError", `Cloudflare API: ${message}`)
+    }
+    return ok(payload.result as T)
+  }
+}
+
+export type CertificateStatus =
+  | { state: "missing" }
+  | { state: "invalid"; reason: string }
+  | { state: "valid"; expiresAt: Date; daysLeft: number }
+
+export async function certificateStatus(certFile: string, domain: string, now = new Date()): Promise<CertificateStatus> {
+  let certificate: X509Certificate
+  try {
+    certificate = new X509Certificate(await fs.readFile(certFile))
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "invalid", reason: "not a PEM certificate" }
+  }
+  if (!certificate.subjectAltName?.split(", ").includes(`DNS:*.${domain}`)) {
+    return { state: "invalid", reason: `does not cover *.${domain}` }
+  }
+  const expiresAt = new Date(certificate.validTo)
+  const daysLeft = Math.floor((expiresAt.getTime() - now.getTime()) / 86_400_000)
+  return daysLeft < 0 ? { state: "invalid", reason: `expired on ${expiresAt.toISOString().slice(0, 10)}` } : { state: "valid", expiresAt, daysLeft }
+}
+
+function manualCertificate(domain: string, options: SetupOptions): Result<void> {
+  const paths = certificatePaths(domain, options.environment)
+  options.log(`  Issue a certificate for *.${domain} with your DNS provider's plugin, then install it here:`)
+  options.log(`    fullchain  ${paths.certFile}`)
+  options.log(`    key        ${paths.keyFile}`)
+  options.log(`  For example: acme.sh --issue --server letsencrypt --dns <dns_provider> -d '*.${domain}'`)
+  options.log("  Providers: https://github.com/acmesh-official/acme.sh/wiki/dnsapi")
+  return errResult("CLIError", "run work tailscale setup again once the certificate is installed")
+}
+
+async function issueCertificate(domain: string, zone: CloudflareZone, options: SetupOptions): Promise<Result<void>> {
+  const { environment, log } = options
+  const paths = certificatePaths(domain, environment)
+  const acme = await findAcmeSh(environment, options.prompts, log)
+  if (!acme.ok) return acme
+
+  log(`  Requesting *.${domain} from Let's Encrypt. This takes about a minute…`)
+  const acmeEnvironment = { ...childEnvironment(environment), CF_Token: zone.token, CF_Zone_ID: zone.zoneId }
+  const issued = await run(acme.value, ["--issue", "--server", "letsencrypt", "--dns", "dns_cf", "-d", `*.${domain}`, "--keylength", "ec-256"], acmeEnvironment)
+  // acme.sh exits with 2 when its copy is still current and it skipped the request.
+  if (issued.code !== 0 && issued.code !== 2) {
+    return errResult("ProcessError", `acme.sh could not issue the certificate:\n${lastLines(issued.output)}`)
+  }
+
+  await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 })
+  const installed = await run(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment)
+  if (installed.code !== 0) return errResult("ProcessError", `acme.sh could not install the certificate:\n${lastLines(installed.output)}`)
+
+  const cron = await run(acme.value, ["--install-cronjob"], acmeEnvironment)
+  const status = await certificateStatus(paths.certFile, domain)
+  if (status.state !== "valid") return errResult("ProcessError", `the installed certificate is unusable (${status.state === "invalid" ? status.reason : "missing"})`)
+  log(`✓ Certificate: valid until ${status.expiresAt.toISOString().slice(0, 10)}. ${cron.code === 0 ? "acme.sh renews it automatically." : "Set up renewal with: acme.sh --install-cronjob"}`)
+  return ok(undefined)
+}
+
+async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts, log: (line: string) => void): Promise<Result<string>> {
+  if (await commandExists("acme.sh", environment)) return ok("acme.sh")
+  const home = path.join(os.homedir(), ".acme.sh", "acme.sh")
+  if (await fs.access(home).then(() => true, () => false)) return ok(home)
+
+  if (await commandExists("brew", environment) && await prompts.confirm("  acme.sh issues the certificate. Install it with Homebrew now?")) {
+    log("  Installing acme.sh…")
+    const installed = await run("brew", ["install", "acme.sh"], childEnvironment(environment))
+    if (installed.code === 0) return ok("acme.sh")
+    return errResult("ProcessError", `brew install acme.sh failed:\n${lastLines(installed.output)}`)
+  }
+  return errResult("ProcessError", "acme.sh is required to issue the certificate: https://github.com/acmesh-official/acme.sh#1-how-to-install")
+}
+
+function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv) {
+  return new Promise<{ code: number; output: string }>((resolve) => {
+    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] })
+    let output = ""
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString() })
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString() })
+    child.on("error", (cause) => resolve({ code: -1, output: cause.message }))
+    child.on("close", (code) => resolve({ code: code ?? -1, output }))
+  })
+}
+
+function lastLines(output: string, count = 15) {
+  return output.trim().split("\n").slice(-count).join("\n")
+}
+
+export async function tailscaleDoctorLine(environment: NodeJS.ProcessEnv): Promise<string> {
+  const exposure = await tailscaleExposure(environment)
+  if (!exposure.ok) return `tailscale\tnot configured\t${exposure.error.message}`
+  if (exposure.value.mode !== "tailscale") return "tailscale\tnot configured"
+  const { domain, certFile } = exposure.value
+
+  const certificate = await certificateStatus(certFile, domain)
+  if (certificate.state === "missing") return `tailscale\tmissing\t${certFile}. Run: work tailscale setup`
+  if (certificate.state === "invalid") return `tailscale\tinvalid\tcertificate ${certificate.reason}. Run: work tailscale setup`
+
+  const ip = await tailnetIPv4(environment)
+  if (!ip.ok) return `tailscale\tmissing\t${ip.error.message}`
+  if (!await wildcardResolvesTo(domain, ip.value)) return `tailscale\tdns\t*.${domain} does not point to ${ip.value}. Run: work tailscale setup`
+  if (certificate.daysLeft <= 14) return `tailscale\texpiring\tcertificate expires in ${certificate.daysLeft} days. Run: work tailscale setup`
+  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)`
+}

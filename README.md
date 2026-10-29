@@ -142,28 +142,28 @@ The name resolves to this machine's Tailscale address, so only devices in your
 tailnet can reach it. Because each workspace has its own hostname, sessions and
 cookies stay separate, and an OAuth provider needs a single wildcard redirect URI.
 
-One-time machine setup:
+One-time machine setup, guided:
 
-1. Add a DNS record `*.dev.example.com` of type `A` that points to `tailscale ip -4`.
-   With Cloudflare, keep it DNS only.
-2. Get a certificate for `*.dev.example.com`. Let's Encrypt needs a DNS challenge
-   because the name is not public, for example with [acme.sh](https://github.com/acmesh-official/acme.sh):
+```sh
+work tailscale setup
+```
 
-   ```sh
-   CF_Token=… acme.sh --issue --server letsencrypt --dns dns_cf -d '*.dev.example.com'
-   acme.sh --install-cert -d '*.dev.example.com' --ecc \
-     --fullchain-file ~/.config/work/tailscale/fullchain.pem \
-     --key-file ~/.config/work/tailscale/key.pem
-   ```
+It asks for the domain, points `*.dev.example.com` at this machine's Tailscale
+address, gets a Let's Encrypt certificate with [acme.sh](https://github.com/acmesh-official/acme.sh)
+(offering to install it with Homebrew), and saves the domain in
+`~/.config/work/config.json`. With Cloudflare DNS it does all of this itself
+with an API token scoped to "Edit zone DNS" on that zone; with other providers
+it prints the record and the certificate command. Running it again only redoes
+what is missing or about to expire, and `work doctor` reports both.
 
-3. Put the settings in a gitignored `.env.local` at the project root:
+To configure it by hand instead, put these in a gitignored `.env.local`:
 
-   ```sh
-   WORK_TAILSCALE_DOMAIN=dev.example.com
-   WORK_TAILSCALE_CERT=~/.config/work/tailscale/fullchain.pem
-   WORK_TAILSCALE_KEY=~/.config/work/tailscale/key.pem
-   # WORK_TAILSCALE_PORT=47443   local proxy port
-   ```
+```sh
+WORK_TAILSCALE_DOMAIN=dev.example.com
+WORK_TAILSCALE_CERT=~/path/to/fullchain.pem
+WORK_TAILSCALE_KEY=~/path/to/key.pem
+# WORK_TAILSCALE_PORT=47443   local proxy port
+```
 
 `work` starts a small HTTPS proxy on `127.0.0.1` and points `tailscale serve`'s
 TCP port 443 at it, so no root is needed. Each request goes through the command's

@@ -6,35 +6,19 @@ import net from "node:net"
 import path from "node:path"
 import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
+import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
 import { parseServeTarget, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
 
 const execFileAsync = promisify(execFile)
 
-// Self-signed for *.dev.example.test and *.localhost, valid until 2126. Test use only.
-const certificate = `-----BEGIN CERTIFICATE-----
-MIIBuDCCAV6gAwIBAgIUbbFeW4RQ1AoCoTTM7qsLO64Ma+IwCgYIKoZIzj0EAwIw
-FDESMBAGA1UEAwwJd29yayB0ZXN0MCAXDTI2MTAyOTA3MzY0NFoYDzIxMjYxMDA1
-MDczNjQ0WjAUMRIwEAYDVQQDDAl3b3JrIHRlc3QwWTATBgcqhkjOPQIBBggqhkjO
-PQMBBwNCAAROcBOyRx48ZHVYlZtDbDkwwqSV8qc0OSq7ve3ptr0P2GPhOvQ38VXs
-3atF5/doJY2ZlJKALzIjs+QYoz99WAnko4GLMIGIMB0GA1UdDgQWBBRWgmWVWC0K
-H1oYYQGDW6zrZ0324zAfBgNVHSMEGDAWgBRWgmWVWC0KH1oYYQGDW6zrZ0324zAP
-BgNVHRMBAf8EBTADAQH/MDUGA1UdEQQuMCyCEiouZGV2LmV4YW1wbGUudGVzdIIL
-Ki5sb2NhbGhvc3SCCWxvY2FsaG9zdDAKBggqhkjOPQQDAgNIADBFAiACaJ13B2Wz
-qv3sd2UCN3YXHCOz6eMyCvCT70V4sTGj3gIhAPFdclW40lN9yLCwdCAnYtA/AKr7
-2K0T/4glqkyv1v50
------END CERTIFICATE-----
-`
-const privateKey = `-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYFjL6t0Zd7ydFlwC
-JFR+9VE61Mjc8pu4UZaJAVl/3syhRANCAAROcBOyRx48ZHVYlZtDbDkwwqSV8qc0
-OSq7ve3ptr0P2GPhOvQ38VXs3atF5/doJY2ZlJKALzIjs+QYoz99WAnk
------END PRIVATE KEY-----
-`
 
 describe("tailscale", () => {
-  test("reads the domain, certificate, key, and proxy port from the environment", () => {
-    const exposure = tailscaleExposure({
+  test("reads the domain, certificate, key, and proxy port from the environment", async (t) => {
+    const config = await tempDir()
+    t.after(() => fs.rm(config, { recursive: true, force: true }))
+    const exposure = await tailscaleExposure({
+      XDG_CONFIG_HOME: config,
       WORK_TAILSCALE_DOMAIN: "Dev.Example.com",
       WORK_TAILSCALE_CERT: "/certs/fullchain.pem",
       WORK_TAILSCALE_KEY: "/certs/key.pem",
@@ -46,17 +30,38 @@ describe("tailscale", () => {
     assert.equal(tailscaleHostname("web-feature-x-tilly", exposure.ok ? exposure.value : { mode: "local" }), "web-feature-x-tilly.dev.example.com")
   })
 
-  test("rejects incomplete configuration", () => {
-    const complete = { WORK_TAILSCALE_DOMAIN: "dev.example.com", WORK_TAILSCALE_CERT: "/c.pem", WORK_TAILSCALE_KEY: "/k.pem" }
+  test("falls back to the domain saved by work tailscale setup and its certificate paths", async (t) => {
+    const config = await tempDir()
+    t.after(() => fs.rm(config, { recursive: true, force: true }))
+    await fs.mkdir(path.join(config, "work"))
+    await fs.writeFile(path.join(config, "work", "config.json"), JSON.stringify({ maxTtlSeconds: 60, tailscale: { domain: "dev.example.com" } }))
+
+    const exposure = await tailscaleExposure({ XDG_CONFIG_HOME: config })
+    assert.deepEqual(exposure, {
+      ok: true,
+      value: {
+        mode: "tailscale",
+        domain: "dev.example.com",
+        certFile: path.join(config, "work", "tailscale", "dev.example.com.fullchain.pem"),
+        keyFile: path.join(config, "work", "tailscale", "dev.example.com.key.pem"),
+        port: 47443,
+      },
+    })
+  })
+
+  test("rejects a missing or unusable domain and a privileged proxy port", async (t) => {
+    const config = await tempDir()
+    t.after(() => fs.rm(config, { recursive: true, force: true }))
     for (const environment of [
-      { ...complete, WORK_TAILSCALE_DOMAIN: "" },
-      { ...complete, WORK_TAILSCALE_DOMAIN: "localhost" },
-      { ...complete, WORK_TAILSCALE_KEY: "" },
-      { ...complete, WORK_TAILSCALE_PORT: "443" },
+      {},
+      { WORK_TAILSCALE_DOMAIN: "localhost" },
+      { WORK_TAILSCALE_DOMAIN: "dev.example.com", WORK_TAILSCALE_PORT: "443" },
     ]) {
-      const exposure = tailscaleExposure(environment)
+      const exposure = await tailscaleExposure({ XDG_CONFIG_HOME: config, ...environment })
       assert.equal(exposure.ok, false, JSON.stringify(environment))
     }
+    const missing = await tailscaleExposure({ XDG_CONFIG_HOME: config })
+    assert.match(missing.ok ? "" : missing.error.message, /work tailscale setup/)
   })
 
   test("finds what tailscale serve forwards on port 443", () => {

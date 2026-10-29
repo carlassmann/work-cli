@@ -20,12 +20,27 @@ export async function resolveMaxTtlSeconds(
   }
   if (config.maxTtlSeconds !== undefined) return validateTtlSeconds(config.maxTtlSeconds, "maxTtlSeconds")
 
-  const file = path.join(environment["XDG_CONFIG_HOME"] || path.join(os.homedir(), ".config"), "work", "config.json")
+  const globalConfig = await readGlobalConfig(environment)
+  if (!globalConfig.ok) return globalConfig
+  const value = globalConfig.value["maxTtlSeconds"]
+  return validateTtlSeconds(value === undefined ? 0 : value, `${globalConfigFile(environment)} maxTtlSeconds`)
+}
+
+export function globalConfigDir(environment: NodeJS.ProcessEnv = process.env) {
+  return path.join(environment["XDG_CONFIG_HOME"] || path.join(os.homedir(), ".config"), "work")
+}
+
+function globalConfigFile(environment: NodeJS.ProcessEnv = process.env) {
+  return path.join(globalConfigDir(environment), "config.json")
+}
+
+export async function readGlobalConfig(environment: NodeJS.ProcessEnv = process.env): Promise<Result<Record<string, unknown>>> {
+  const file = globalConfigFile(environment)
   let contents: string
   try {
     contents = await fs.readFile(file, "utf8")
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return ok(0)
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return ok({})
     return errResult("ConfigError", `failed to read global config ${file}`, cause)
   }
   let globalConfig: unknown
@@ -37,8 +52,23 @@ export async function resolveMaxTtlSeconds(
   if (!globalConfig || typeof globalConfig !== "object" || Array.isArray(globalConfig)) {
     return errResult("ConfigError", `global config ${file} must contain an object`)
   }
-  const value = (globalConfig as Record<string, unknown>)["maxTtlSeconds"]
-  return validateTtlSeconds(value === undefined ? 0 : value, `${file} maxTtlSeconds`)
+  return ok(globalConfig as Record<string, unknown>)
+}
+
+export async function updateGlobalConfig(
+  patch: Record<string, unknown>,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Result<void>> {
+  const current = await readGlobalConfig(environment)
+  if (!current.ok) return current
+  const file = globalConfigFile(environment)
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, `${JSON.stringify({ ...current.value, ...patch }, null, 2)}\n`)
+    return ok(undefined)
+  } catch (cause) {
+    return errResult("IOError", `failed to write global config ${file}`, cause)
+  }
 }
 
 function validateTtlSeconds(value: unknown, field: string): Result<number> {
