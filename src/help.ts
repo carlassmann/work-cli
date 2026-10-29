@@ -392,7 +392,7 @@ Checks:
   git root
   work.config.js
   worktrees.setup
-  whether portless is installed when routed commands need it
+  whether portless is installed and its proxy answers when routed commands need it
   Cloudflare Tunnel configuration when environment variables are set
   command start mode and route mode`,
 

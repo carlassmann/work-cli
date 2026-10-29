@@ -22,9 +22,11 @@ import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
 import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
+import { probePortless } from "./portless-proxy.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
+import type { DaemonStatus } from "./daemon-client.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
 import type { Result } from "./result.js"
@@ -850,11 +852,11 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   const needsPortless = config?.ok ? Object.values(config.value.commands).some(usesPortless) : false
-  console.log(`portless\t${needsPortless ? await commandExists("portless") ? "ok" : "missing" : "not needed"}`)
-
   const environment = root.ok
     ? await loadWorkspaceEnvironment(root.value, root.value)
     : ok(childEnvironment())
+  console.log(await portlessDoctorLine(needsPortless, environment.ok ? environment.value : process.env))
+
   const cloudflareConfigured = environment.ok && Boolean(environment.value["WORK_CLOUDFLARE_DOMAIN"] || environment.value["WORK_CLOUDFLARE_TUNNEL_ID"])
   if (!cloudflareConfigured) {
     console.log("cloudflare\tnot configured")
@@ -873,8 +875,7 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   console.log(await tailscaleDoctorLine(environment.ok ? environment.value : process.env))
 
-  const status = await daemonStatus()
-  console.log(`workd\t${status.running ? `ok\tpid=${status.pid}` : "stopped"}`)
+  console.log(["workd", ...daemonStatusFields(await daemonStatus(), "ok")].join("\t"))
 
   if (config?.ok) {
     for (const [id, command] of Object.entries(config.value.commands)) {
@@ -936,14 +937,28 @@ async function runDaemon(args: ReadonlyArray<string>): Promise<Result<void>> {
     }
 
     case "status": {
-      const status = await daemonStatus()
-      console.log(status.running ? `workd running pid=${status.pid}` : "workd stopped")
+      console.log(["workd", ...daemonStatusFields(await daemonStatus(), "running")].join(" "))
       return ok(undefined)
     }
 
     default:
       return errResult("CLIError", "usage: work daemon <start|stop|status>")
   }
+}
+
+async function portlessDoctorLine(needed: boolean, environment: NodeJS.ProcessEnv) {
+  if (!needed) return "portless\tnot needed"
+  if (!await commandExists("portless", environment)) return "portless\tmissing"
+  const proxy = await probePortless(environment)
+  if (proxy.state === "ok") return `portless\tok\tproxy on :${proxy.port}`
+  if (proxy.state === "stopped") return `portless\tstopped\tno proxy on :${proxy.port}; start it with portless proxy start`
+  return `portless\tblocked\t:${proxy.port} answers without X-Portless; another proxy owns the port`
+}
+
+function daemonStatusFields(status: DaemonStatus, runningLabel: string) {
+  if (status.running) return [runningLabel, `pid=${status.pid}`]
+  if (status.outdated) return ["outdated", `pid=${status.pid} runs an older build; the next work command replaces it`]
+  return ["stopped"]
 }
 
 async function runDocs(args: ReadonlyArray<string>): Promise<Result<void>> {
