@@ -30,3 +30,11 @@ test("waits through startup errors, accepts redirects, and bounds failed or hung
   assert.ok(performance.now() - startedAt < 1_000)
   assert.equal((await waitForUrl("http://127.0.0.1:1", 50)).ok, false)
 })
+
+test("stops waiting once the command is gone", async () => {
+  const startedAt = performance.now()
+  const stopped = await waitForUrl("http://127.0.0.1:1", 10_000, async () => false)
+  assert.equal(stopped.ok, false)
+  if (!stopped.ok) assert.match(stopped.error.message, /stopped before it was ready/)
+  assert.ok(performance.now() - startedAt < 1_000)
+})

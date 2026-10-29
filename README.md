@@ -52,11 +52,6 @@ Routed commands get a stable URL of the form:
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
 
-Use `work wait [workspace] <command> [--timeout seconds]` before browser tests.
-It waits for HTTP 2xx/3xx at the tracked URL (default: 60 seconds), without
-following redirects. For local HTTPS, set `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`
-when launching if your Node runtime does not trust the proxy's CA.
-
 ## Install
 
 Not on npm yet — clone and link locally with [Bun](https://bun.sh):
@@ -201,7 +196,8 @@ Day in the life:
 # Spin it up — creates ../tilly.worktrees/chat-streaming, runs setup, starts both servers.
 work up chat-streaming --create
 
-# Open the web app. Sync server is already wired up via the env var.
+# Wait until the web app answers, then open it. Sync server is already wired up via the env var.
+work wait chat-streaming web
 open https://web-chat-streaming-tilly.localhost
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.

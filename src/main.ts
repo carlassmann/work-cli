@@ -128,8 +128,8 @@ function commandHandlers(): Record<Exclude<CommandName, "help">, CommandHandler>
     watch: runWatch,
     logs: runLogs,
     urls: runUrls,
-    wait: runWait,
     stop: runStop,
+    wait: runWait,
     doctor: runDoctor,
     prune: runPrune,
     daemon: runDaemon,
@@ -699,31 +699,6 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, {
-    flags: { project: valueFlag("p"), workspace: valueFlag("w"), timeout: valueFlag() },
-  })
-  if (!parsed.ok) return parsed
-
-  const timeout = parsed.value.flags.timeout === undefined ? 60 : Number(parsed.value.flags.timeout)
-  if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(timeout * 1_000)) {
-    return errResult("CLIError", `invalid timeout: ${parsed.value.flags.timeout}`)
-  }
-
-  const target = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "wait")
-  if (!target.ok) return target
-  const state = await readWorkspaceState(target.value.project, target.value.workspace)
-  if (!state.ok) return state
-  const record = state.value?.commands[target.value.command]
-  if (!record) return errResult("CLIError", `no tracked command: ${target.value.workspace}/${target.value.command}`)
-  if (!record.url) return errResult("CLIError", `no URL for ${target.value.workspace}/${target.value.command}; enable routing for this command`)
-
-  const ready = await waitForUrl(record.url, timeout * 1_000)
-  if (!ready.ok) return ready
-  console.log(record.url)
-  return ok(undefined)
-}
-
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
@@ -738,6 +713,39 @@ async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   console.log(`stopped ${wsCmd.value.project}/${wsCmd.value.workspace}/${wsCmd.value.command}`)
+  return ok(undefined)
+}
+
+async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args, {
+    flags: { project: valueFlag("p"), workspace: valueFlag("w"), timeout: valueFlag() },
+  })
+  if (!parsed.ok) return parsed
+
+  const timeout = parsed.value.flags.timeout === undefined ? 60 : Number(parsed.value.flags.timeout)
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    return errResult("CLIError", `invalid timeout: ${parsed.value.flags.timeout}`)
+  }
+
+  const target = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "wait")
+  if (!target.ok) return target
+  const { project, workspace, command } = target.value
+  const state = await readWorkspaceState(project, workspace)
+  if (!state.ok) return state
+  const record = state.value?.commands[command]
+  if (!record) return errResult("CLIError", `no tracked command: ${workspace}/${command}`)
+  if (!record.url) return errResult("CLIError", `no URL for ${workspace}/${command}; enable routing for this command`)
+
+  const isAlive = async () => {
+    const current = await readWorkspaceState(project, workspace)
+    const tracked = current.ok ? current.value?.commands[command] : undefined
+    if (!tracked) return false
+    // workd restarts on-exit commands itself, so a dead pid may be replaced shortly.
+    return tracked.restart === "on-exit" || await commandRuntimeStatus(tracked) === "up"
+  }
+  const ready = await waitForUrl(record.url, timeout * 1_000, isAlive)
+  if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. Logs: work logs -p ${project} -w ${workspace} ${command}`)
+  console.log(record.url)
   return ok(undefined)
 }
 
