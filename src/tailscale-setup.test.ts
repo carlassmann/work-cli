@@ -118,17 +118,23 @@ describe("tailscale setup", () => {
     assert.deepEqual(certificatePaths("dev.example.com", environment), { certFile: "/certs/full.pem", keyFile: "/certs/key.pem" })
   })
 
-  test("lets Portless serve the domain on this machine without dropping its other TLDs or port", () => {
-    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "dev.example.com"], 443, "0.15.12"), { state: "ready" })
-    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, "0.13.0"), { state: "outdated" })
-    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, null), { state: "outdated" })
-    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "test"], 443, "0.15.1"), {
+  test("lets Portless serve the domain on this machine without dropping its other TLDs", () => {
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "dev.example.com"], 443, "0.15.12", null), { state: "ready" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, "0.13.0", null), { state: "outdated" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, null, null), { state: "outdated" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "test"], 443, "0.15.1", null), {
       state: "install",
       args: ["service", "install", "--tld", "localhost", "--tld", "test", "--tld", "dev.example.com"],
     })
-    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 1355, "1.0.0"), {
-      state: "install",
-      args: ["service", "install", "--tld", "localhost", "--tld", "dev.example.com", "--port", "1355"],
+  })
+
+  test("leaves a customized or non-443 Portless service to the user", () => {
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 1355, "1.0.0", null), { state: "port" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "dev.example.com"], 8443, "1.0.0", null), { state: "port" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, "1.0.0", "it runs in LAN mode"), {
+      state: "manual",
+      reason: "it runs in LAN mode",
+      args: ["service", "install", "--tld", "localhost", "--tld", "dev.example.com"],
     })
   })
 })

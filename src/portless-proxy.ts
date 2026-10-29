@@ -3,7 +3,12 @@ import http from "node:http"
 import https from "node:https"
 import os from "node:os"
 import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { childEnvironment } from "./environment.js"
 import { existsAt, resolveHome } from "./shell.js"
+
+const exec = promisify(execFile)
 
 const PROBE_TIMEOUT_MS = 2_000
 
@@ -62,6 +67,40 @@ export async function portlessTlds(environment: NodeJS.ProcessEnv) {
     } catch {}
   }
   return ["localhost"]
+}
+
+// Why reinstalling the Portless startup service could change more than its TLDs, or null when it
+// runs with defaults. service install replaces the whole configuration, and only TLDs carry over.
+export async function portlessServiceCustomization(environment: NodeJS.ProcessEnv): Promise<string | null> {
+  try {
+    const { stdout } = await exec("portless", ["service", "status"], { env: { ...childEnvironment(environment), NO_COLOR: "1" }, timeout: 10_000 })
+    return serviceCustomization(stdout, portlessStateDir(environment), readFileOrEmpty)
+  } catch {
+    return "portless service status failed"
+  }
+}
+
+export async function serviceCustomization(
+  status: string,
+  stateDir: string,
+  readEntry: (file: string) => Promise<string>,
+): Promise<string | null> {
+  const fields = new Map(status.split("\n").flatMap((line) => {
+    const match = /^\s*([^:]+):\s*(.*)$/.exec(line)
+    return match ? [[match[1]!.trim(), match[2]!.trim()] as const] : []
+  }))
+  if (fields.get("Installed") !== "yes") return "the startup service is not installed"
+  if (fields.get("HTTPS") !== "yes") return "it runs without HTTPS"
+  if (fields.get("LAN mode") !== "no") return "it runs in LAN mode"
+  if (fields.get("Wildcard") !== "no") return "it runs with wildcard routing"
+  if (fields.get("State directory") !== stateDir) return `it uses the state directory ${fields.get("State directory") ?? "(unknown)"}`
+  const entry = fields.get("Service entry")
+  if (entry && /--(cert|key)\b/.test(await readEntry(entry))) return "it uses a custom certificate"
+  return null
+}
+
+async function readFileOrEmpty(file: string) {
+  return fs.readFile(file, "utf8").catch(() => "")
 }
 
 function portlessStateDir(environment: NodeJS.ProcessEnv) {

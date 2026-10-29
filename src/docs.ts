@@ -369,7 +369,9 @@ tailscale serve answers only for other devices. work tailscale setup offers to
 let Portless (0.15.1 or newer) serve the domain here too:
   portless service install --tld localhost --tld dev.example.com
 Portless then maps each name to 127.0.0.1 in /etc/hosts, so the same URLs open
-on this machine. Without it, use the *.localhost URLs here.
+on this machine. Portless must listen on 443; when its service has other custom
+settings, setup prints the command instead of running it. Without it, use the
+*.localhost URLs here.
 
 An active Tailscale workspace keeps that mode for later work run, restart, and
 up calls. Run work down before switching it back to local mode.

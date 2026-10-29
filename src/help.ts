@@ -373,7 +373,8 @@ Steps (each is skipped when already done):
      and installs it under ~/.config/work/tailscale. acme.sh renews it.
   4. Offers to let Portless serve the domain on this machine too, so the URLs
      also open here (portless service install --tld localhost --tld <domain>,
-     Portless 0.15.1 or newer).
+     Portless 0.15.1 or newer on port 443). If the Portless service has other
+     custom settings, it prints the command instead of running it.
   5. Saves the domain in ~/.config/work/config.json.
 
 Options:

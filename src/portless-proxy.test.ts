@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
-import { portlessPort, portlessTlds, probePortless } from "./portless-proxy.js"
+import { portlessPort, portlessTlds, probePortless, serviceCustomization } from "./portless-proxy.js"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
 
@@ -90,3 +90,32 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve))
   return port
 }
+
+describe("serviceCustomization", () => {
+  const defaults = (overrides: Record<string, string> = {}) => Object.entries({
+    "Manager state": "running",
+    Installed: "yes",
+    "Proxy on 443": "responding",
+    HTTPS: "yes",
+    TLDs: ".localhost",
+    "LAN mode": "no",
+    Wildcard: "no",
+    "State directory": "/home/me/.portless",
+    "Service entry": "/Library/LaunchDaemons/sh.portless.proxy.plist",
+    ...overrides,
+  }).map(([key, value]) => `  ${key}: ${value}`).join("\n")
+  const plainEntry = async () => "<string>--https</string>"
+
+  test("accepts a service running with defaults", async () => {
+    assert.equal(await serviceCustomization(`portless service\n${defaults()}`, "/home/me/.portless", plainEntry), null)
+  })
+
+  test("names the setting a reinstall would reset", async () => {
+    assert.equal(await serviceCustomization(defaults({ Installed: "no" }), "/home/me/.portless", plainEntry), "the startup service is not installed")
+    assert.equal(await serviceCustomization(defaults({ HTTPS: "no" }), "/home/me/.portless", plainEntry), "it runs without HTTPS")
+    assert.equal(await serviceCustomization(defaults({ "LAN mode": "yes" }), "/home/me/.portless", plainEntry), "it runs in LAN mode")
+    assert.equal(await serviceCustomization(defaults({ Wildcard: "yes" }), "/home/me/.portless", plainEntry), "it runs with wildcard routing")
+    assert.equal(await serviceCustomization(defaults(), "/other/state", plainEntry), "it uses the state directory /home/me/.portless")
+    assert.equal(await serviceCustomization(defaults(), "/home/me/.portless", async () => "<string>--cert</string>"), "it uses a custom certificate")
+  })
+})

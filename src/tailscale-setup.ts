@@ -10,7 +10,7 @@ import { readGlobalConfig, updateGlobalConfig } from "./config.js"
 import { acmeManagesCertificate, renewalScheduled, scheduleRenewal } from "./certificate-renewal.js"
 import { childEnvironment } from "./environment.js"
 import { errResult, ok } from "./result.js"
-import { portlessPort, portlessTlds } from "./portless-proxy.js"
+import { portlessPort, portlessServiceCustomization, portlessTlds } from "./portless-proxy.js"
 import { commandExists } from "./shell.js"
 import { certificatePaths, isPreviewDomain, savedTailscaleDomain, tailscaleExposure } from "./tailscale.js"
 import type { Result } from "./result.js"
@@ -326,19 +326,32 @@ function renewalLine(renewal: Result<string>) {
 async function serveDomainOnThisMachine(domain: string, options: SetupOptions) {
   const { environment, prompts, log } = options
   if (!await commandExists("portless", environment)) return
-  const plan = portlessDomainPlan(domain, await portlessTlds(environment), await portlessPort(environment), await portlessVersion(environment))
+  const tlds = await portlessTlds(environment)
+  const port = await portlessPort(environment)
+  const version = await portlessVersion(environment)
+  const customization = tlds.includes(domain) || port !== 443 ? null : await portlessServiceCustomization(environment)
+  const plan = portlessDomainPlan(domain, tlds, port, version, customization)
   if (plan.state === "ready") {
     log(`✓ This machine: Portless serves *.${domain} too, so the URLs open here as well.`)
     return
   }
 
   log(`• This machine: *.${domain} points to its tailnet address, which only other devices reach.`)
+  if (plan.state === "port") {
+    log(`  Portless listens on :${port}, but the URLs use :443, so they open only on other devices. Use the *.localhost URLs here.`)
+    return
+  }
   if (plan.state === "outdated") {
     log("  Portless 0.15.1 or newer can serve the domain here too. Update it (npm install -g portless@latest) and run work tailscale setup again.")
     return
   }
 
   const command = `portless ${plan.args.join(" ")}`
+  if (plan.state === "manual") {
+    log(`  Portless can serve it here too, but reinstalling its service would reset other settings: ${plan.reason}.`)
+    log(`  Run this with your own options added: ${command}`)
+    return
+  }
   if (!await prompts.confirm(`  Let Portless serve it here too? This reinstalls its startup service with \`${command}\` and asks for your password.`)) {
     log(`  To do it later: ${command}`)
     return
@@ -349,16 +362,18 @@ async function serveDomainOnThisMachine(domain: string, options: SetupOptions) {
     : `  Portless exited with code ${code}. Run it yourself: ${command}`)
 }
 
-export function portlessDomainPlan(domain: string, tlds: Array<string>, port: number, version: string | null):
+// The names map to 127.0.0.1 without a port, so Portless must listen on 443 for them to open here.
+export function portlessDomainPlan(domain: string, tlds: Array<string>, port: number, version: string | null, customization: string | null):
   | { state: "ready" }
+  | { state: "port" }
   | { state: "outdated" }
+  | { state: "manual"; reason: string; args: Array<string> }
   | { state: "install"; args: Array<string> } {
+  if (port !== 443) return { state: "port" }
   if (tlds.includes(domain)) return { state: "ready" }
   if (!version || compareVersions(version, "0.15.1") < 0) return { state: "outdated" }
-  // service install replaces the service configuration, so keep the current TLDs and port.
   const args = ["service", "install", ...[...tlds, domain].flatMap((tld) => ["--tld", tld])]
-  if (port !== 443) args.push("--port", String(port))
-  return { state: "install", args }
+  return customization ? { state: "manual", reason: customization, args } : { state: "install", args }
 }
 
 function compareVersions(left: string, right: string) {
@@ -451,6 +466,12 @@ export async function tailscaleDoctorLine(environment: NodeJS.ProcessEnv): Promi
   if (!ip.ok) return `tailscale\tmissing\t${ip.error.message}`
   if (!await wildcardResolvesTo(domain, ip.value)) return `tailscale\tdns\t*.${domain} does not point to ${ip.value}. Run: work tailscale setup`
   if (certificate.daysLeft <= 14) return `tailscale\texpiring\tcertificate expires in ${certificate.daysLeft} days. Run: work tailscale setup`
-  const servedHere = (await portlessTlds(environment)).includes(domain)
-  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)${servedHere ? "" : `; this machine opens the URLs only after work tailscale setup lets Portless serve ${domain}`}`
+  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)${await localAccessNote(domain, environment)}`
+}
+
+async function localAccessNote(domain: string, environment: NodeJS.ProcessEnv) {
+  const port = await portlessPort(environment)
+  if (port !== 443) return `; this machine opens the URLs only through *.localhost, because Portless listens on :${port}`
+  if (!(await portlessTlds(environment)).includes(domain)) return `; this machine opens the URLs only after work tailscale setup lets Portless serve ${domain}`
+  return ""
 }
