@@ -6,6 +6,7 @@ import { execFile, spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import { globalConfigDir, readGlobalConfig } from "./config.js"
 import { childEnvironment } from "./environment.js"
 import { dnsLabel } from "./names.js"
 import { errResult, ok } from "./result.js"
@@ -31,25 +32,42 @@ const DEFAULT_PORT = 47443
 const SERVE_PORT = "443"
 const domainPattern = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$/
 
-export function tailscaleExposure(environment: NodeJS.ProcessEnv = process.env): Result<Exposure> {
-  const domain = environment["WORK_TAILSCALE_DOMAIN"]?.trim().toLowerCase()
-  const certFile = environment["WORK_TAILSCALE_CERT"]?.trim()
-  const keyFile = environment["WORK_TAILSCALE_KEY"]?.trim()
+// Settings come from WORK_TAILSCALE_* first, then from `work tailscale setup`,
+// which stores the domain globally and the certificate under the config dir.
+export async function tailscaleExposure(environment: NodeJS.ProcessEnv = process.env): Promise<Result<Exposure>> {
+  const globalConfig = await readGlobalConfig(environment)
+  if (!globalConfig.ok) return globalConfig
+  const domain = (environment["WORK_TAILSCALE_DOMAIN"] ?? savedTailscaleDomain(globalConfig.value))?.trim().toLowerCase()
   const port = Number(environment["WORK_TAILSCALE_PORT"] ?? DEFAULT_PORT)
 
-  if (!domain || !domainPattern.test(domain) || !domain.includes(".") || domain.length > 189) {
-    return errResult("ConfigError", "WORK_TAILSCALE_DOMAIN must be a domain whose wildcard record points to this machine's Tailscale IP, for example dev.example.com.")
+  if (!isPreviewDomain(domain)) {
+    return errResult("ConfigError", "no tailnet domain configured. Run: work tailscale setup")
   }
 
-  if (!certFile || !keyFile) {
-    return errResult("ConfigError", `WORK_TAILSCALE_CERT and WORK_TAILSCALE_KEY must point to a certificate and key for *.${domain}.`)
-  }
+  const { certFile, keyFile } = certificatePaths(domain, environment)
 
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     return errResult("ConfigError", "WORK_TAILSCALE_PORT must be a free local port between 1024 and 65535.")
   }
 
-  return ok({ mode: "tailscale", domain, certFile: resolveHome(certFile), keyFile: resolveHome(keyFile), port })
+  return ok({ mode: "tailscale", domain, certFile, keyFile, port })
+}
+
+export function savedTailscaleDomain(globalConfig: Record<string, unknown>) {
+  const saved = globalConfig["tailscale"]
+  return saved && typeof saved === "object" && "domain" in saved && typeof saved.domain === "string" ? saved.domain : undefined
+}
+
+export function isPreviewDomain(domain: string | undefined): domain is string {
+  return Boolean(domain && domainPattern.test(domain) && domain.includes(".") && domain.length <= 189)
+}
+
+// WORK_TAILSCALE_CERT/KEY override the default location, for runtime and setup alike.
+export function certificatePaths(domain: string, environment: NodeJS.ProcessEnv = process.env) {
+  const dir = path.join(globalConfigDir(environment), "tailscale")
+  const certFile = environment["WORK_TAILSCALE_CERT"]?.trim() || path.join(dir, `${domain}.fullchain.pem`)
+  const keyFile = environment["WORK_TAILSCALE_KEY"]?.trim() || path.join(dir, `${domain}.key.pem`)
+  return { certFile: resolveHome(certFile), keyFile: resolveHome(keyFile) }
 }
 
 export function tailscaleHostname(route: string, exposure: Exposure) {

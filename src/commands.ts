@@ -19,6 +19,7 @@ export const commandSpecs = [
   { name: "urls", summary: "List workspace URLs.", flags: ["-p", "--project", "--json"] },
   { name: "stop", summary: "Stop a tracked command.", flags: ["-p", "--project", "-w", "--workspace"] },
   { name: "wait", summary: "Wait for a command URL to respond.", flags: ["-p", "--project", "-w", "--workspace", "--timeout"] },
+  { name: "tailscale", summary: "Set up private tailnet previews.", flags: ["--domain", "-y", "--yes"] },
   { name: "doctor", summary: "Check project setup.", flags: [] },
   { name: "prune", summary: "Remove dead process records.", flags: [] },
   { name: "daemon", summary: "Manage workd.", flags: [] },

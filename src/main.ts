@@ -4,9 +4,11 @@ import path from "node:path"
 import readline from "node:readline/promises"
 import { spawn } from "node:child_process"
 import { createRequire } from "node:module"
+import { Writable } from "node:stream"
 import { stdin as input, stdout as output } from "node:process"
 import { cloudflareExposure } from "./cloudflare.js"
 import { tailscaleExposure } from "./tailscale.js"
+import { runTailscaleSetup, tailscaleDoctorLine } from "./tailscale-setup.js"
 import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
@@ -131,6 +133,7 @@ function commandHandlers(): Record<Exclude<CommandName, "help">, CommandHandler>
     urls: runUrls,
     stop: runStop,
     wait: runWait,
+    tailscale: runTailscale,
     doctor: runDoctor,
     prune: runPrune,
     daemon: runDaemon,
@@ -768,10 +771,56 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
     // workd restarts on-exit commands itself, so a dead pid may be replaced shortly.
     return tracked.restart === "on-exit" || await commandRuntimeStatus(tracked) === "up"
   }
-  const ready = await waitForUrl(record.url, timeout * 1_000, isAlive)
+  // A tailnet URL resolves to this machine's tailnet address, which only other devices reach.
+  const probeUrl = record.exposure?.mode === "tailscale" ? record.localUrl ?? record.url : record.url
+  const ready = await waitForUrl(probeUrl, timeout * 1_000, isAlive)
   if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. Logs: work logs -p ${project} -w ${workspace} ${command}`)
   console.log(record.url)
   return ok(undefined)
+}
+
+async function runTailscale(args: ReadonlyArray<string>): Promise<Result<void>> {
+  const parsed = parseArgs(args, { flags: { domain: valueFlag(), yes: booleanFlag("y") } })
+  if (!parsed.ok) return parsed
+  const [subcommand, ...rest] = parsed.value.positional
+  if (subcommand !== "setup") return errResult("CLIError", "usage: work tailscale setup [--domain <domain>] [--yes]")
+  const extra = unexpectedPositional(rest, 0)
+  if (extra) return extra
+
+  const interactive = Boolean(process.stdin.isTTY)
+  const yes = parsed.value.flags.yes
+  const root = await gitRoot(process.cwd())
+  const environment = root.ok ? await loadWorkspaceEnvironment(root.value, root.value) : ok(childEnvironment())
+  if (!environment.ok) return environment
+
+  return runTailscaleSetup({
+    domain: parsed.value.flags.domain,
+    environment: { ...process.env, ...environment.value },
+    log: (line) => console.log(line),
+    prompts: {
+      ask: async (question) => interactive ? ask(question) : "",
+      askSecret: async (question) => interactive ? askSecret(question) : "",
+      confirm: async (question) => yes || (interactive && await confirm(question)),
+      waitForEnter: async (question) => { if (interactive) await ask(question) },
+    },
+  })
+}
+
+async function ask(question: string) {
+  const rl = readline.createInterface({ input, output })
+  const answer = await rl.question(question)
+  rl.close()
+  return answer
+}
+
+async function askSecret(question: string) {
+  output.write(question)
+  const muted = new Writable({ write: (_chunk, _encoding, callback) => callback() })
+  const rl = readline.createInterface({ input, output: muted, terminal: true })
+  const answer = await rl.question("")
+  rl.close()
+  output.write("\n")
+  return answer
 }
 
 async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -819,21 +868,7 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
     }
   }
 
-  const tailscaleConfigured = environment.ok && Boolean(environment.value["WORK_TAILSCALE_DOMAIN"])
-  if (!tailscaleConfigured) {
-    console.log("tailscale\tnot configured")
-  } else {
-    const exposure = tailscaleExposure(environment.ok ? environment.value : process.env)
-    if (!exposure.ok) {
-      console.log(`tailscale\tinvalid\t${exposure.error.message}`)
-    } else if (!await commandExists("tailscale")) {
-      console.log("tailscale\tmissing\ttailscale CLI is not installed")
-    } else if (exposure.value.mode === "tailscale" && !await existsAt(exposure.value.certFile)) {
-      console.log(`tailscale\tmissing\t${exposure.value.certFile}`)
-    } else {
-      console.log(`tailscale\tok\t${exposure.value.mode === "tailscale" ? exposure.value.domain : ""}`)
-    }
-  }
+  console.log(await tailscaleDoctorLine(environment.ok ? environment.value : process.env))
 
   const status = await daemonStatus()
   console.log(`workd\t${status.running ? `ok\tpid=${status.pid}` : "stopped"}`)
