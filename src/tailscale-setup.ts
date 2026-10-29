@@ -80,9 +80,9 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
   }
 
   // A rerun with a valid certificate still repairs renewal, which an earlier run may have failed to schedule.
-  if (certificateReady && await acmeManagesCertificate(domain) && !await renewalScheduled(environment)) {
+  if (certificateReady && await acmeManagesCertificate(domain, environment) && !await renewalScheduled(environment)) {
     const acme = await installedAcmeSh(environment)
-    if (acme) log(renewalLine(await scheduleRenewal(acme, environment, (args) => run(acme, args, childEnvironment(environment), ACME_TIMEOUT_MS))))
+    if (acme) log(renewalLine(await scheduleRenewal(acme, environment, (args) => runWithTimeout(acme, args, childEnvironment(environment), ACME_TIMEOUT_MS))))
   }
 
   const stored = await updateGlobalConfig({ tailscale: { domain } }, environment)
@@ -295,20 +295,20 @@ async function issueCertificate(domain: string, zone: CloudflareZone, options: S
 
   log(`  Requesting *.${domain} from Let's Encrypt. This takes about a minute…`)
   const acmeEnvironment = { ...childEnvironment(environment), CF_Token: zone.token, CF_Zone_ID: zone.zoneId }
-  const issued = await run(acme.value, ["--issue", "--server", "letsencrypt", "--dns", "dns_cf", "-d", `*.${domain}`, "--keylength", "ec-256"], acmeEnvironment, ACME_TIMEOUT_MS)
+  const issued = await runWithTimeout(acme.value, ["--issue", "--server", "letsencrypt", "--dns", "dns_cf", "-d", `*.${domain}`, "--keylength", "ec-256"], acmeEnvironment, ACME_TIMEOUT_MS)
   // acme.sh exits with 2 when its copy is still current and it skipped the request.
   if (issued.code !== 0 && issued.code !== 2) {
     return errResult("ProcessError", `acme.sh could not issue the certificate:\n${lastLines(issued.output)}`)
   }
 
   for (const file of [paths.certFile, paths.keyFile]) await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
-  const installed = await run(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment, ACME_TIMEOUT_MS)
+  const installed = await runWithTimeout(acme.value, ["--install-cert", "-d", `*.${domain}`, "--ecc", "--fullchain-file", paths.certFile, "--key-file", paths.keyFile], acmeEnvironment, ACME_TIMEOUT_MS)
   if (installed.code !== 0) return errResult("ProcessError", `acme.sh could not install the certificate:\n${lastLines(installed.output)}`)
 
   const status = await certificateStatus(paths, domain)
   if (status.state !== "valid") return errResult("ProcessError", `the installed certificate is unusable (${status.state === "invalid" ? status.reason : "missing"})`)
   log(`✓ Certificate: valid until ${status.expiresAt.toISOString().slice(0, 10)}.`)
-  log(renewalLine(await scheduleRenewal(acme.value, environment, (args) => run(acme.value, args, acmeEnvironment, ACME_TIMEOUT_MS))))
+  log(renewalLine(await scheduleRenewal(acme.value, environment, (args) => runWithTimeout(acme.value, args, acmeEnvironment, ACME_TIMEOUT_MS))))
   return ok(undefined)
 }
 
@@ -328,24 +328,26 @@ async function findAcmeSh(environment: NodeJS.ProcessEnv, prompts: SetupPrompts,
 
   if (await commandExists("brew", environment) && await prompts.confirm("  acme.sh issues the certificate. Install it with Homebrew now?")) {
     log("  Installing acme.sh…")
-    const installed = await run("brew", ["install", "acme.sh"], childEnvironment(environment), BREW_TIMEOUT_MS)
+    const installed = await runWithTimeout("brew", ["install", "acme.sh"], childEnvironment(environment), BREW_TIMEOUT_MS)
     if (installed.code === 0) return ok("acme.sh")
     return errResult("ProcessError", `brew install acme.sh failed:\n${lastLines(installed.output)}`)
   }
   return errResult("ProcessError", "acme.sh is required to issue the certificate: https://github.com/acmesh-official/acme.sh#1-how-to-install")
 }
 
-function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv, timeoutMs: number) {
+export function runWithTimeout(command: string, args: Array<string>, env: NodeJS.ProcessEnv, timeoutMs: number) {
   return new Promise<{ code: number; output: string }>((resolve) => {
     // Its own process group, so a timeout also stops grandchildren that hold the output pipes open.
     const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"], detached: true })
     let output = ""
+    let timedOut = false
     const stop = (signal: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, signal)
       } catch {}
     }
     const timer = setTimeout(() => {
+      timedOut = true
       output += `\n${command} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`
       stop("SIGTERM")
       setTimeout(() => stop("SIGKILL"), 5_000).unref()
@@ -353,7 +355,8 @@ function run(command: string, args: Array<string>, env: NodeJS.ProcessEnv, timeo
     child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString() })
     child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString() })
     child.on("error", (cause) => { clearTimeout(timer); resolve({ code: -1, output: cause.message }) })
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, output }) })
+    // A timeout fails the run even if the direct child already exited 0 and only descendants lingered.
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: timedOut ? -1 : code ?? -1, output }) })
   })
 }
 
