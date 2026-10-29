@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import { spawn } from "node:child_process"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
@@ -387,6 +388,57 @@ describe("cli", () => {
     assert.ok(!result.stdout.includes("api"))
   })
 
+  test("ps and urls --json print public command fields only", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    // A fresh process, so its start time matches startedAt however long the suite has run.
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" })
+    t.after(() => sleeper.kill())
+    const pid = sleeper.pid!
+    const startedAt = new Date().toISOString()
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {},
+    }`)
+    const statePath = path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json")
+    await writeFile(statePath, JSON.stringify({
+      project: "tilly",
+      workspace: "main",
+      branch: "main",
+      root,
+      commands: {
+        web: {
+          id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root,
+          log: path.join(root, "web.log"), url: "https://web-main-tilly.localhost", startedAt, pid,
+          env: { API_TOKEN: "secret" },
+        },
+        worker: {
+          id: "worker", label: "worker", command: "worker", run: "worker", route: null, cwd: root,
+          log: path.join(root, "worker.log"), startedAt, pid,
+        },
+      },
+    }))
+
+    const ps = await runCli(["status", "--json"], { cwd: root, stateRoot })
+    assert.equal(ps.exitCode, 0)
+    assert.equal(ps.stderr, "")
+    assert.deepEqual(JSON.parse(ps.stdout), [
+      { project: "tilly", workspace: "main", command: "web", status: "up", pid, url: "https://web-main-tilly.localhost" },
+      { project: "tilly", workspace: "main", command: "worker", status: "up", pid, url: null },
+    ])
+
+    const urls = await runCli(["urls", "--json"], { cwd: root, stateRoot })
+    assert.equal(urls.exitCode, 0)
+    assert.deepEqual(JSON.parse(urls.stdout), [
+      { project: "tilly", workspace: "main", command: "web", url: "https://web-main-tilly.localhost" },
+    ])
+
+    const empty = await runCli(["urls", "other", "--json"], { cwd: root, stateRoot })
+    assert.equal(empty.stdout, "[]\n")
+  })
+
   test("state commands work outside a configured project", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
@@ -418,6 +470,11 @@ describe("cli", () => {
     assert.equal(urls.exitCode, 0)
     assert.ok(urls.stdout.includes("tilly/feature-x"))
     assert.ok(urls.stdout.includes("https://web-feature-x-tilly.localhost"))
+
+    const json = await runCli(["urls", "-p", "tilly", "feature-x", "--json"], { cwd: root, stateRoot })
+    assert.equal(json.exitCode, 0)
+    assert.equal(json.stderr, "")
+    assert.deepEqual(JSON.parse(json.stdout), [{ project: "tilly", workspace: "feature-x", command: "web", url: "https://web-feature-x-tilly.localhost" }])
 
     const ps = await runCli(["ps"], { cwd: root, stateRoot })
     assert.equal(ps.exitCode, 0)

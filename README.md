@@ -253,7 +253,8 @@ Day in the life:
 # Spin it up — creates ../tilly.worktrees/chat-streaming, runs setup, starts both servers.
 work up chat-streaming --create
 
-# Open the web app. Sync server is already wired up via the env var.
+# Wait until the web app answers, then open it. Sync server is already wired up via the env var.
+work wait chat-streaming web
 open https://web-chat-streaming-tilly.localhost
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
@@ -279,6 +280,10 @@ work watch -a     # live-refresh everything
 work urls         # routed URLs for the current workspace
 work doctor       # diagnose anything broken
 ```
+
+For scripts and agents, `work ps --json` (or `status --json`) and `work urls --json`
+print arrays of `{ project, workspace, command, ... }` objects. They leave out stored
+environments and credentials, and print `[]` when nothing matches.
 
 ### Adopting a worktree created by another tool
 
