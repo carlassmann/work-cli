@@ -193,7 +193,6 @@ Options:
 
 Exit:
   1 on timeout or when the command stops before it answers.
-  For local HTTPS, Node must trust the proxy CA (NODE_EXTRA_CA_CERTS).
 
 Examples:
   work wait web
