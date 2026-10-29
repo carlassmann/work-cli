@@ -2,7 +2,8 @@ import fs from "node:fs"
 import fsp from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
-import { reserveBackendPort, syncCloudflareTunnel } from "./cloudflare.js"
+import { reserveBackendPort } from "./cloudflare.js"
+import { syncExposures } from "./exposure.js"
 import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
@@ -66,8 +67,8 @@ export async function startCommand(
   }
 
   const route = commandRoute(config, workspace.workspace, id, command)
-  if (exposure.mode === "cloudflare" && command.route === true && !route) {
-    return errResult("ProcessError", `command ${id} must use Portless to publish through Cloudflare Tunnel`)
+  if (exposure.mode !== "local" && command.route === true && !route) {
+    return errResult("ProcessError", `command ${id} must use Portless to publish through ${exposure.mode === "cloudflare" ? "Cloudflare Tunnel" : "Tailscale"}`)
   }
 
   const published = exposure.mode === "cloudflare" && Boolean(route)
@@ -132,14 +133,14 @@ export async function startCommand(
     return write
   }
 
-  if (published) {
-    const synced = await syncCloudflareTunnel(environment.value)
+  if (exposure.mode !== "local" && route) {
+    const synced = await syncExposures(environment.value)
     if (!synced.ok) {
       delete nextState.commands[id]
       clearEmptyWorkspaceExposure(nextState)
       await writeWorkspaceState(nextState)
       await stopProcessTree(pid.value)
-      await syncCloudflareTunnel(environment.value)
+      await syncExposures(environment.value)
       return synced
     }
   }
@@ -191,7 +192,7 @@ export async function stopCommand(
   project: string,
   workspace: string,
   id: string,
-  options: { syncCloudflare?: boolean; environment?: NodeJS.ProcessEnv } = {},
+  options: { syncExposures?: boolean; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<Result<boolean>> {
   const stateResult = await readWorkspaceState(project, workspace)
   if (!stateResult.ok) return stateResult
@@ -210,14 +211,14 @@ export async function stopCommand(
   const write = await writeWorkspaceState(state)
   if (!write.ok) return write
 
-  if (command.exposure?.mode === "cloudflare" && options.syncCloudflare !== false) {
+  if (command.exposure && command.exposure.mode !== "local" && options.syncExposures !== false) {
     const environment = await loadWorkspaceEnvironment(
       state.sourceRoot ?? state.root,
       state.root,
       options.environment,
     )
     if (!environment.ok) return environment
-    const synced = await syncCloudflareTunnel(environment.value)
+    const synced = await syncExposures(environment.value)
     if (!synced.ok) return synced
   }
 
@@ -296,14 +297,14 @@ export async function restartTrackedCommand(
     return write
   }
 
-  if (command.exposure?.mode === "cloudflare") {
-    const synced = await syncCloudflareTunnel(environment.value)
+  if (command.exposure && command.exposure.mode !== "local") {
+    const synced = await syncExposures(environment.value)
     if (!synced.ok) {
       await stopProcessTree(pid.value)
       delete state.commands[id]
       clearEmptyWorkspaceExposure(state)
       await writeWorkspaceState(state)
-      await syncCloudflareTunnel(environment.value)
+      await syncExposures(environment.value)
       return synced
     }
   }
@@ -357,7 +358,7 @@ export async function pruneDeadCommands(
   }
 
   if (pruned > 0) {
-    const synced = await syncCloudflareTunnel(environment)
+    const synced = await syncExposures(environment)
     if (!synced.ok) return synced
   }
 

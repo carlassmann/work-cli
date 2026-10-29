@@ -84,7 +84,7 @@ Examples:
 Start all autoStart commands for a workspace.
 
 Usage:
-  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare]
+  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare|--tailscale]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -94,6 +94,7 @@ Options:
   --no-create        Fail if the workspace worktree does not exist.
   --remote <name>    Fetch the branch from this remote and track it when creating.
   --cloudflare       Publish routed commands through Cloudflare Tunnel.
+  --tailscale        Serve routed commands to your tailnet devices (work docs tailscale).
 
 Behavior:
   work up                      Use current worktree.
@@ -114,13 +115,14 @@ Examples:
 Run worktrees.setup for a workspace.
 
 Usage:
-  work setup [workspace] [--cloudflare]
+  work setup [workspace] [--cloudflare|--tailscale]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
 
 Options:
   --cloudflare    Use stable Cloudflare URLs in setup environment.
+  --tailscale     Use stable tailnet URLs in setup environment.
 
 Environment:
   WORK_PROJECT       Project slug.
@@ -203,9 +205,9 @@ Examples:
 Stop and start one configured command, or autoStart commands with --all.
 
 Usage:
-  work restart [workspace] <command> [--cloudflare]
-  work restart [-p project] [-w workspace] <command> [--cloudflare]
-  work restart [-p project] [-w workspace] --all [--cloudflare]
+  work restart [workspace] <command> [--cloudflare|--tailscale]
+  work restart [-p project] [-w workspace] <command> [--cloudflare|--tailscale]
+  work restart [-p project] [-w workspace] --all [--cloudflare|--tailscale]
 
 Arguments:
   command      Configured command id.
@@ -216,6 +218,7 @@ Options:
   -a, --all                 Inside a project: restart autoStart commands for the workspace.
                             Outside a project: restart matching tracked commands.
   --cloudflare              Publish routed commands through Cloudflare Tunnel.
+  --tailscale               Serve routed commands to your tailnet devices.
 
 Examples:
   work restart web
@@ -229,8 +232,8 @@ Examples:
 Start one configured command.
 
 Usage:
-  work run [workspace] <command> [--cloudflare]
-  work run [-w workspace] <command> [--cloudflare]
+  work run [workspace] <command> [--cloudflare|--tailscale]
+  work run [-w workspace] <command> [--cloudflare|--tailscale]
 
 Arguments:
   command      Configured command id.
@@ -238,6 +241,7 @@ Arguments:
 Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
   --cloudflare              Publish the routed command through Cloudflare Tunnel.
+  --tailscale               Serve the routed command to your tailnet devices.
 
 Behavior:
   If the command is already alive, work prints "already up".

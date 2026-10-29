@@ -41,6 +41,13 @@ export type Exposure =
       tunnelId: string
       credentialsFile: string
     }
+  | {
+      mode: "tailscale"
+      domain: string
+      certFile: string
+      keyFile: string
+      port: number
+    }
 
 export type CommandRecord = {
   id: string
@@ -70,7 +77,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 8
+export const DAEMON_PROTOCOL_VERSION = 9
 
 export type DaemonCommand =
   | {

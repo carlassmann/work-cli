@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises"
 import net from "node:net"
-import { syncCloudflareTunnel } from "./cloudflare.js"
+import { syncExposures } from "./exposure.js"
+import { recoverTailnetProxy } from "./tailscale.js"
 import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
@@ -171,7 +172,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
 
         for (const id of ids) {
           desired.delete(key(command.project, command.workspace, id))
-          const r = await stopCommand(command.project, command.workspace, id, { syncCloudflare: false, environment: command.environment })
+          const r = await stopCommand(command.project, command.workspace, id, { syncExposures: false, environment: command.environment })
 
           if (!r.ok) {
             errors.push(`${id}: ${r.error.message}`)
@@ -183,7 +184,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
           }
         }
 
-        const synced = await syncCloudflareTunnel(command.environment)
+        const synced = await syncExposures(command.environment)
         if (!synced.ok) return synced
 
         if (errors.length > 0) {
@@ -211,7 +212,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
         if (existing && (existing.exposure?.mode ?? "local") !== command.exposure.mode) {
           return { ok: false, error: { tag: "ProcessError", message: `command ${command.command} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${command.workspace.workspace} before switching.` } } as const
         }
-        const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command, { syncCloudflare: false, environment: command.environment })
+        const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command, { syncExposures: false, environment: command.environment })
         if (!stop.ok) return stop
         desired.delete(key(command.config.project, command.workspace.workspace, command.command))
         return startDesired(command.config, command.workspace, command.command, command.exposure, command.environment)
@@ -272,6 +273,8 @@ async function maintain() {
     if (maintenanceTicks % 5 === 0) {
       const pruned = await pruneCommands(process.env)
       if (!pruned.ok) debugLog("workd", `automatic prune failed: ${pruned.error.message}`)
+      const recovered = await recoverTailnetProxy(process.env)
+      if (!recovered.ok) debugLog("workd", `tailnet proxy recovery failed: ${recovered.error.message}`)
     }
   } finally {
     maintenanceRunning = false

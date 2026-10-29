@@ -1,5 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["src/workd.ts", "src/**/*.test.ts"],
-  "project": ["src/**/*.ts"]
+  "entry": [
+    "src/workd.ts",
+    "src/tailnet-proxy.ts",
+    "src/**/*.test.ts"
+  ],
+  "project": [
+    "src/**/*.ts"
+  ]
 }

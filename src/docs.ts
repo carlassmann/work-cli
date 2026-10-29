@@ -9,6 +9,7 @@ work intentionally sits on top of existing tools:
   git       owns repositories, branches, and worktrees
   portless  owns HTTPS local routing and port allocation
   cloudflared owns remote routing and public TLS when --cloudflare is used
+  tailscale owns private remote access when --tailscale is used
 
 Core workflow:
   work init my-project
@@ -320,6 +321,43 @@ up calls. Run work down before switching it back to local mode.
 Use a single hostname label directly below the Cloudflare zone so Universal SSL
 covers it. In WorkOS, allow https://*.example.com and the required callback path.`,
 
+  tailscale: `--tailscale serves routed commands to your other tailnet devices.
+
+Each routed command gets a stable HTTPS hostname on a domain you control:
+  https://{command}-{workspace}-{project}.dev.example.com
+
+One-time machine setup:
+  1. Public DNS: a wildcard A record *.dev.example.com pointing to this machine's
+     Tailscale IPv4 address (tailscale ip -4). It is only reachable in the tailnet.
+  2. A certificate for *.dev.example.com, for example from Let's Encrypt with a
+     DNS challenge (acme.sh or lego). work reloads renewed files automatically.
+
+Environment variables in a gitignored .env.local:
+  WORK_TAILSCALE_DOMAIN  wildcard domain, such as dev.example.com
+  WORK_TAILSCALE_CERT    certificate (full chain) for *.dev.example.com
+  WORK_TAILSCALE_KEY     private key for that certificate
+  WORK_TAILSCALE_PORT    local proxy port (default 47443)
+
+Run:
+  work setup --tailscale
+  work up --tailscale
+
+work starts a small HTTPS proxy on 127.0.0.1 and points tailscale serve's TCP
+port 443 at it, so no root is needed. The proxy sends each request through the
+command's local Portless URL with X-Forwarded-Host and X-Forwarded-Proto set to
+the public origin. When the last Tailscale command stops, work stops the proxy
+and removes the port 443 forward.
+
+WORK_URL and the other WORK_*_URL variables use the tailnet URLs, like
+--cloudflare. On this machine itself, keep using the *.localhost URLs: the
+domain resolves to this machine's tailnet address, where Portless answers.
+
+An active Tailscale workspace keeps that mode for later work run, restart, and
+up calls. Run work down before switching it back to local mode.
+
+In WorkOS or other OAuth providers, allow https://*.dev.example.com and the
+callback path.`,
+
   commands: `CLI commands:
   work init [project]
     create work.config.js
@@ -327,10 +365,10 @@ covers it. In WorkOS, allow https://*.example.com and the required callback path
   work create <workspace> [--remote <name>]
     create a git worktree without setup or commands
 
-  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare]
+  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare|--tailscale]
     start autoStart commands for a workspace
 
-  work setup [workspace] [--cloudflare]
+  work setup [workspace] [--cloudflare|--tailscale]
     run worktrees.setup for a workspace
 
   work down [workspace]
