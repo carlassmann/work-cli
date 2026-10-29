@@ -12,6 +12,7 @@ import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, r
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
+import { startUpdateChecker } from "./updates.js"
 
 const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
   ["run", "down", "stop", "restart", "restartTracked", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
@@ -92,6 +93,7 @@ const server = net.createServer((socket) => {
 })
 
 server.listen(daemonSocketFile())
+const stopUpdateChecker = startUpdateChecker()
 
 let maintenanceTask: Promise<void> | null = null
 const maintenanceInterval = setInterval(() => {
@@ -355,6 +357,7 @@ async function shutdown() {
   shuttingDown = true
 
   clearInterval(maintenanceInterval)
+  stopUpdateChecker()
   server.close()
   await Promise.allSettled([...activeRequests, ...(maintenanceTask ? [maintenanceTask] : [])])
 

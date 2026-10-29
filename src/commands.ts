@@ -23,6 +23,7 @@ export const commandSpecs = [
   { name: "doctor", summary: "Check project setup.", flags: [] },
   { name: "prune", summary: "Remove dead process records.", flags: [] },
   { name: "daemon", summary: "Manage workd.", flags: [] },
+  { name: "updates", summary: "Show cached update status.", flags: [] },
   { name: "help", summary: "Show command help.", flags: [] },
   { name: "docs", summary: "Show built-in reference docs.", flags: [] },
   { name: "completions", summary: "Print shell completion script.", flags: [] },
