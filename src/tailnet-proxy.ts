@@ -56,8 +56,16 @@ server.on("upgrade", (request: http.IncomingMessage, socket: Duplex, head: Buffe
   forward.end()
 })
 
+server.on("error", (cause) => {
+  console.error(`${new Date().toISOString()} tailnet proxy failed: ${cause.message}`)
+  process.exit(1)
+})
+
 server.listen(config.port, "127.0.0.1", () => {
   console.log(`${new Date().toISOString()} tailnet proxy listening on 127.0.0.1:${config.port}`)
+  // work waits for this before pointing tailscale serve here, so a foreign listener on the port is never exposed.
+  process.send?.("ready")
+  process.disconnect?.()
 })
 
 // work rewrites the config when commands start or stop; certificates renew in place.
@@ -89,10 +97,11 @@ function reload() {
 function upstream(request: http.IncomingMessage): https.RequestOptions | null {
   const publicHost = request.headers.host
   if (!publicHost) return null
-  const local = config.routes[publicHost.replace(/:\d+$/, "").toLowerCase()]
-  if (!local) return null
-
-  const url = new URL(local)
+  const hostname = publicHost.replace(/:\d+$/, "").toLowerCase()
+  // Host comes from the client, so only own keys count; "constructor" must not resolve to Object.prototype.
+  if (!Object.hasOwn(config.routes, hostname)) return null
+  const url = parseUrl(config.routes[hostname])
+  if (!url) return null
   const forwardedFor = [request.headers["x-forwarded-for"], request.socket.remoteAddress].filter(Boolean).join(", ")
   return {
     host: "127.0.0.1",
@@ -107,6 +116,14 @@ function upstream(request: http.IncomingMessage): https.RequestOptions | null {
       "x-forwarded-proto": "https",
       "x-forwarded-for": forwardedFor,
     },
+  }
+}
+
+function parseUrl(value: unknown) {
+  try {
+    return new URL(String(value))
+  } catch {
+    return null
   }
 }
 

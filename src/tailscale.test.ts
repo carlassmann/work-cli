@@ -104,9 +104,42 @@ describe("tailscale", () => {
     const unknown = await get(proxyPort, "other.dev.example.test", "/")
     assert.equal(unknown.status, 404)
 
+    for (const hostile of ["constructor", "__proto__", "hasOwnProperty"]) {
+      assert.equal((await get(proxyPort, hostile, "/")).status, 404)
+    }
+    assert.equal(proxy.exitCode, null)
+
     // The page request above leaves a pooled upstream socket; the upgrade must not reuse it.
     const { stdout } = await execFileAsync(process.execPath, ["-e", webSocketClient, String(proxyPort), "web-main-tilly.dev.example.test"], { timeout: 4_000 })
     assert.match(stdout, /101 Switching Protocols[\s\S]*echo:ping/)
+  })
+
+  test("proxy exits without reporting ready when its port is taken", async (t) => {
+    const dir = await tempDir()
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    await fs.writeFile(path.join(dir, "cert.pem"), certificate)
+    await fs.writeFile(path.join(dir, "key.pem"), privateKey)
+
+    const occupant = net.createServer()
+    const port = await listen(occupant)
+    t.after(() => occupant.close())
+
+    const configFile = path.join(dir, "proxy.json")
+    await fs.writeFile(configFile, JSON.stringify({
+      port,
+      certFile: path.join(dir, "cert.pem"),
+      keyFile: path.join(dir, "key.pem"),
+      portlessPort: 443,
+      routes: {},
+    }))
+    const proxy = spawn(process.execPath, [path.resolve("src/tailnet-proxy.ts"), configFile], { stdio: ["ignore", "ignore", "ignore", "ipc"] })
+    t.after(() => proxy.kill())
+    const messages: Array<unknown> = []
+    proxy.on("message", (message) => messages.push(message))
+
+    const exitCode = await new Promise((resolve) => proxy.once("exit", resolve))
+    assert.equal(exitCode, 1)
+    assert.deepEqual(messages, [])
   })
 })
 

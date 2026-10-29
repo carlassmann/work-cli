@@ -2,6 +2,7 @@
 import fs from "node:fs/promises"
 import net from "node:net"
 import { syncExposures } from "./exposure.js"
+import { recoverTailnetProxy } from "./tailscale.js"
 import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
@@ -272,6 +273,8 @@ async function maintain() {
     if (maintenanceTicks % 5 === 0) {
       const pruned = await pruneCommands(process.env)
       if (!pruned.ok) debugLog("workd", `automatic prune failed: ${pruned.error.message}`)
+      const recovered = await recoverTailnetProxy(process.env)
+      if (!recovered.ok) debugLog("workd", `tailnet proxy recovery failed: ${recovered.error.message}`)
     }
   } finally {
     maintenanceRunning = false

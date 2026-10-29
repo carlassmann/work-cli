@@ -1,9 +1,9 @@
 import fs from "node:fs"
 import fsp from "node:fs/promises"
-import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { execFile, spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { childEnvironment } from "./environment.js"
@@ -119,6 +119,12 @@ async function runSync(environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   return ensureServe(config.port, environment)
 }
 
+// The proxy runs detached from workd, so workd calls this periodically to restart it if it died.
+export async function recoverTailnetProxy(environment: NodeJS.ProcessEnv = process.env): Promise<Result<void>> {
+  if (!await readConfig() || await proxyRecord(environment)) return ok(undefined)
+  return syncTailnetProxy(environment)
+}
+
 async function stopTailnetProxy(environment: NodeJS.ProcessEnv = process.env): Promise<Result<void>> {
   const config = await readConfig()
   const proxy = await proxyRecord(environment)
@@ -219,7 +225,7 @@ async function startProxy(port: number, environment: NodeJS.ProcessEnv): Promise
   const startedAt = new Date().toISOString()
   const child = spawn(process.execPath, [proxyScript(), configFile()], {
     detached: true,
-    stdio: ["ignore", output, output],
+    stdio: ["ignore", output, output, "ipc"],
     env: childEnvironment(environment),
   })
   fs.closeSync(output)
@@ -228,9 +234,10 @@ async function startProxy(port: number, environment: NodeJS.ProcessEnv): Promise
     child.once("spawn", () => resolve(child.pid ? ok(child.pid) : errResult("ProcessError", "tailnet proxy spawned without a pid")))
   })
   if (!spawned.ok) return spawned
-  child.unref()
 
-  const listening = await waitForPort(port, spawned.value)
+  const listening = await waitForReady(child)
+  if (child.connected) child.disconnect()
+  child.unref()
   if (!listening) {
     await stopProxyPid(spawned.value, environment)
     return errResult("ProcessError", `the tailnet proxy did not listen on 127.0.0.1:${port}. See ${log}`)
@@ -245,17 +252,14 @@ async function startProxy(port: number, environment: NodeJS.ProcessEnv): Promise
   }
 }
 
-async function waitForPort(port: number, pid: number) {
-  for (let waited = 0; waited < 5_000 && isPidRunning(pid); waited += 100) {
-    const open = await new Promise<boolean>((resolve) => {
-      const socket = net.connect(port, "127.0.0.1")
-      socket.once("connect", () => { socket.destroy(); resolve(true) })
-      socket.once("error", () => resolve(false))
-    })
-    if (open) return true
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-  return false
+// Only the proxy's own message counts: a successful connect could be another process holding the port.
+function waitForReady(child: ChildProcess): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 5_000)
+    const settle = (ready: boolean) => { clearTimeout(timer); resolve(ready) }
+    child.once("message", (message) => settle(message === "ready"))
+    child.once("exit", () => settle(false))
+  })
 }
 
 async function proxyRecord(environment: NodeJS.ProcessEnv): Promise<{ pid: number; startedAt: string } | null> {
