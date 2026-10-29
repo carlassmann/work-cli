@@ -9,6 +9,7 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): Recor
     Object.entries(source).filter((entry): entry is [string, string] =>
       entry[1] !== undefined
       && !entry[0].startsWith("WORK_CLOUDFLARE_")
+      && !entry[0].startsWith("WORK_TAILSCALE_")
     ),
   )
 }

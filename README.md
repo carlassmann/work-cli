@@ -122,6 +122,63 @@ The domain must use Cloudflare DNS. Keeping the complete work name in one label,
 
 In WorkOS, allow CORS origin `https://*.example.com` and the required non-default redirect wildcard, such as `https://*.example.com/callback`. Published Tunnel hostnames remain internet-reachable; the random label only makes discovery difficult.
 
+## Private HTTPS on your tailnet with Tailscale
+
+Open previews from your phone or tablet with a real certificate, without making
+them public:
+
+```sh
+work setup --tailscale
+work up --tailscale
+```
+
+Every routed command gets a stable hostname on a domain you control:
+
+```text
+https://{command}-{workspace}-{project}.dev.example.com
+```
+
+The name resolves to this machine's Tailscale address, so only devices in your
+tailnet can reach it. Because each workspace has its own hostname, sessions and
+cookies stay separate, and an OAuth provider needs a single wildcard redirect URI.
+
+One-time machine setup:
+
+1. Add a DNS record `*.dev.example.com` of type `A` that points to `tailscale ip -4`.
+   With Cloudflare, keep it DNS only.
+2. Get a certificate for `*.dev.example.com`. Let's Encrypt needs a DNS challenge
+   because the name is not public, for example with [acme.sh](https://github.com/acmesh-official/acme.sh):
+
+   ```sh
+   CF_Token=… acme.sh --issue --server letsencrypt --dns dns_cf -d '*.dev.example.com'
+   acme.sh --install-cert -d '*.dev.example.com' --ecc \
+     --fullchain-file ~/.config/work/tailscale/fullchain.pem \
+     --key-file ~/.config/work/tailscale/key.pem
+   ```
+
+3. Put the settings in a gitignored `.env.local` at the project root:
+
+   ```sh
+   WORK_TAILSCALE_DOMAIN=dev.example.com
+   WORK_TAILSCALE_CERT=~/.config/work/tailscale/fullchain.pem
+   WORK_TAILSCALE_KEY=~/.config/work/tailscale/key.pem
+   # WORK_TAILSCALE_PORT=47443   local proxy port
+   ```
+
+`work` starts a small HTTPS proxy on `127.0.0.1` and points `tailscale serve`'s
+TCP port 443 at it, so no root is needed. Each request goes through the command's
+local Portless URL with `X-Forwarded-Host` and `X-Forwarded-Proto` set to the
+tailnet origin, so the app sees the same `*.localhost` host as locally. Renewed
+certificate files are picked up automatically. When the last Tailscale command
+stops, `work` stops the proxy and removes the port 443 forward.
+
+`WORK_URL` and the other `WORK_*_URL` variables use the tailnet URLs, as with
+Cloudflare. On the machine itself, keep using `*.localhost`: the domain resolves
+to its own tailnet address, where Portless answers instead. Like Cloudflare mode,
+the workspace keeps Tailscale mode for later `run`, `restart`, and `up` calls;
+run `work down` before switching back. In WorkOS or another OAuth provider, allow
+`https://*.dev.example.com` and the callback path.
+
 ## Example: a real workflow
 
 A real `work.config.js` from [tilly][tilly] — an Astro PWA with a [Jazz][jazz] sync server. Each workspace gets its own isolated sync server, and the web app is told which sync URL to talk to via env var:

@@ -28,7 +28,11 @@ export function routeUrl(project: string, workspace: string, command: string, ov
 }
 
 export function exposureLabel(machine: string, route: string) {
-  const label = slugify(`${machine}-${route}`)
+  return dnsLabel(`${machine}-${route}`)
+}
+
+export function dnsLabel(value: string) {
+  const label = slugify(value)
   if (label.length <= 63) return label
 
   const hash = crypto.createHash("sha256").update(label).digest("hex").slice(0, 8)

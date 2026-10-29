@@ -1,5 +1,6 @@
 import { commandExists } from "./shell.js"
 import { cloudflareHostname } from "./cloudflare.js"
+import { tailscaleHostname } from "./tailscale.js"
 import { routeName, routeUrl } from "./names.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
@@ -22,7 +23,7 @@ export function publicUrl(config: DevConfig, workspace: string, id: string, comm
   if (exposure.mode === "local") return portlessUrl(config, workspace, id, command)
 
   const route = routeName(config.project, workspace, id, command.routeName)
-  return `https://${cloudflareHostname(route, exposure)}`
+  return `https://${exposure.mode === "tailscale" ? tailscaleHostname(route, exposure) : cloudflareHostname(route, exposure)}`
 }
 
 export function routeUrlsForConfig(config: DevConfig, workspace: string, exposure: Exposure = { mode: "local" }) {
