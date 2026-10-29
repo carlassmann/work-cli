@@ -371,7 +371,10 @@ Steps (each is skipped when already done):
      API token (CLOUDFLARE_API_TOKEN, or asked for); elsewhere it prints the record.
   3. Gets a Let's Encrypt certificate for *.<domain> with acme.sh (DNS challenge)
      and installs it under ~/.config/work/tailscale. acme.sh renews it.
-  4. Saves the domain in ~/.config/work/config.json.
+  4. Offers to let Portless serve the domain on this machine too, so the URLs
+     also open here (portless service install --tld localhost --tld <domain>,
+     Portless 0.15.1 or newer).
+  5. Saves the domain in ~/.config/work/config.json.
 
 Options:
   --domain <domain>   For example dev.example.com. Defaults to the saved domain.
@@ -379,7 +382,8 @@ Options:
 
 Afterwards:
   work up --tailscale
-  work doctor          checks the certificate and the DNS record`,
+  work doctor          checks the certificate, the DNS record, and whether
+                       Portless serves the domain on this machine`,
 
   doctor: `work doctor
 

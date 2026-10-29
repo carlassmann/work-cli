@@ -2,7 +2,7 @@ import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { CloudflareDns, certificateStatus } from "./tailscale-setup.js"
+import { CloudflareDns, certificateStatus, portlessDomainPlan } from "./tailscale-setup.js"
 import { generateKeyPairSync } from "node:crypto"
 import { certificate, privateKey } from "./test-certificate.js"
 import { certificatePaths } from "./tailscale.js"
@@ -116,5 +116,19 @@ describe("tailscale setup", () => {
   test("certificate paths honor WORK_TAILSCALE_CERT and WORK_TAILSCALE_KEY", () => {
     const environment = { XDG_CONFIG_HOME: "/tmp/work-config", WORK_TAILSCALE_CERT: "/certs/full.pem", WORK_TAILSCALE_KEY: "/certs/key.pem" }
     assert.deepEqual(certificatePaths("dev.example.com", environment), { certFile: "/certs/full.pem", keyFile: "/certs/key.pem" })
+  })
+
+  test("lets Portless serve the domain on this machine without dropping its other TLDs or port", () => {
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "dev.example.com"], 443, "0.15.12"), { state: "ready" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, "0.13.0"), { state: "outdated" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 443, null), { state: "outdated" })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost", "test"], 443, "0.15.1"), {
+      state: "install",
+      args: ["service", "install", "--tld", "localhost", "--tld", "test", "--tld", "dev.example.com"],
+    })
+    assert.deepEqual(portlessDomainPlan("dev.example.com", ["localhost"], 1355, "1.0.0"), {
+      state: "install",
+      args: ["service", "install", "--tld", "localhost", "--tld", "dev.example.com", "--port", "1355"],
+    })
   })
 })

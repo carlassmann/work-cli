@@ -51,6 +51,19 @@ export async function probePortless(environment: NodeJS.ProcessEnv): Promise<{ s
   return { state, port }
 }
 
+// Domains the running Portless serves next to its app names. Portless 0.15.1 records
+// several in proxy.tlds; older versions write one to proxy.tld.
+export async function portlessTlds(environment: NodeJS.ProcessEnv) {
+  const stateDir = portlessStateDir(environment)
+  for (const file of ["proxy.tlds", "proxy.tld"]) {
+    try {
+      const tlds = (await fs.readFile(path.join(stateDir, file), "utf8")).split("\n").map((line) => line.trim()).filter(Boolean)
+      if (tlds.length > 0) return tlds
+    } catch {}
+  }
+  return ["localhost"]
+}
+
 function portlessStateDir(environment: NodeJS.ProcessEnv) {
   return environment["PORTLESS_STATE_DIR"] ? resolveHome(environment["PORTLESS_STATE_DIR"]) : path.join(os.homedir(), ".portless")
 }

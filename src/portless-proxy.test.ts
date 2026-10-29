@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
-import { portlessPort, probePortless } from "./portless-proxy.js"
+import { portlessPort, portlessTlds, probePortless } from "./portless-proxy.js"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
 
@@ -61,6 +61,19 @@ describe("probePortless", () => {
     await fs.writeFile(path.join(stateDir, "proxy.port"), `${free}\n`)
 
     assert.deepEqual(await probePortless({ PORTLESS_STATE_DIR: stateDir }), { state: "stopped", port: free })
+  })
+})
+
+describe("portlessTlds", () => {
+  test("reads every TLD Portless serves, falling back to the single-TLD file and then localhost", async () => {
+    const stateDir = await tempDir("portless-state-")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["localhost"])
+
+    await fs.writeFile(path.join(stateDir, "proxy.tld"), "test\n")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["test"])
+
+    await fs.writeFile(path.join(stateDir, "proxy.tlds"), "localhost\ndev.example.com\n")
+    assert.deepEqual(await portlessTlds({ PORTLESS_STATE_DIR: stateDir }), ["localhost", "dev.example.com"])
   })
 })
 
