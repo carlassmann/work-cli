@@ -266,7 +266,7 @@ export async function restartTrackedCommand(
   // Recompute what older records or a moved Portless proxy left stale; tailnet and Cloudflare URLs pass through.
   const recordedUrls = stateRouteUrls(state)
   const ports = await portlessPorts({ ...state.env, ...environment.value }, Object.fromEntries(
-    [...new Set([...Object.keys(recordedUrls), id])].map((other) => [other, state.commands[other]?.env]),
+    [...new Set([...Object.keys(recordedUrls), ...(command.url || command.localUrl ? [id] : [])])].map((other) => [other, state.commands[other]?.env]),
   ))
   const urls = Object.fromEntries(Object.entries(recordedUrls).map(([other, url]) => [other, refreshRouteUrl(url, ports[other] ?? 443)]))
   const route = command.route ? portlessLabel(command.route) : null

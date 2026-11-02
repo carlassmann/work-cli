@@ -71,6 +71,19 @@ describe("probePortless", () => {
     }
   })
 
+  test("falls back like portless <name>, which restarts its proxy on the recorded port", async () => {
+    const home = await tempDir("portless-home-")
+    await fs.mkdir(path.join(home, ".portless"))
+    await fs.writeFile(path.join(home, ".portless", "proxy.port"), "8443\n")
+    const environment = { HOME: home, PORTLESS_PORT: "9443" }
+    const answering = (ports: Array<number>) => async (port: number) => ports.includes(port)
+
+    assert.equal(await portlessPort(environment, answering([])), 8443)
+    assert.equal(await portlessPort(environment, answering([9443])), 9443)
+    assert.equal(await portlessPort(environment, answering([9443, 1355])), 1355)
+    assert.equal(await portlessPort({ HOME: await tempDir("portless-home-"), PORTLESS_PORT: "9443" }, answering([])), 9443)
+  })
+
   test("uses the port recorded in PORTLESS_STATE_DIR before PORTLESS_PORT", async () => {
     const stateDir = await tempDir("portless-state-")
     await fs.writeFile(path.join(stateDir, "proxy.port"), "8443\n")

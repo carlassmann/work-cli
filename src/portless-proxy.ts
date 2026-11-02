@@ -21,19 +21,19 @@ const LEGACY_STATE_DIR = "/tmp/portless"
 // The port a `portless` started with this environment serves on, found the way Portless 0.15
 // discovers its proxy: a PORTLESS_STATE_DIR's recorded port, a running proxy recorded in
 // ~/.portless or /tmp/portless, a running proxy on a well-known port, and only then
-// PORTLESS_PORT. When nothing runs, Portless starts one on the recorded port or its default.
-export async function portlessPort(environment: NodeJS.ProcessEnv) {
+// PORTLESS_PORT. When nothing answers, `portless <name>` starts the proxy with an explicit
+// --port for a recorded port that differs from PORTLESS_PORT, so a recorded port still wins.
+export async function portlessPort(environment: NodeJS.ProcessEnv, answers: (port: number) => Promise<boolean> = answersAsPortless) {
   const configured = parsePort(environment["PORTLESS_PORT"])
   if (environment["PORTLESS_STATE_DIR"]) return await recordedPort(portlessStateDir(environment)) ?? configured ?? 443
 
   const recorded = await recordedPort(portlessStateDir(environment))
-  if (recorded && await answersAsPortless(recorded)) return recorded
+  if (recorded && await answers(recorded)) return recorded
   const legacy = await recordedPort(LEGACY_STATE_DIR)
-  if (legacy && await answersAsPortless(legacy)) return legacy
-  for (const port of new Set([443, 80, FALLBACK_PORT, configured ?? FALLBACK_PORT])) {
-    if (await answersAsPortless(port)) return port
-  }
-  return recorded ?? configured ?? 443
+  // Probed together and taken in Portless's order, so stalled ports cost one timeout in total.
+  const candidates = [...new Set([legacy, 443, 80, FALLBACK_PORT, configured ?? FALLBACK_PORT])].filter((port) => port !== null)
+  const answering = await Promise.all(candidates.map(answers))
+  return candidates.find((_port, index) => answering[index]) ?? recorded ?? configured ?? 443
 }
 
 async function recordedPort(stateDir: string) {
