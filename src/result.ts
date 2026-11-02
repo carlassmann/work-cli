@@ -66,8 +66,14 @@ export function trySync<T>(
 }
 
 export function describe(value: unknown): string {
+  // Node reports a failed dual-stack connect as an AggregateError without a message.
+  if (value instanceof AggregateError && value.errors.length > 0) {
+    const causes = [...new Set(value.errors.map(describe))].join("; ")
+    return value.message ? `${value.message}: ${causes}` : causes
+  }
+
   if (value instanceof Error) {
-    return value.message
+    return value.message || errorCode(value) || value.name
   }
 
   if (typeof value === "string") {
@@ -81,6 +87,11 @@ export function describe(value: unknown): string {
   }
 }
 
+function errorCode(error: Error) {
+  const code = (error as Error & { code?: unknown }).code
+  return typeof code === "string" ? code : ""
+}
+
 function appendCause(lines: Array<string>, cause: unknown, options: { debug?: boolean }) {
   if (cause === undefined) return
 
@@ -91,7 +102,7 @@ function appendCause(lines: Array<string>, cause: unknown, options: { debug?: bo
   }
 
   if (cause instanceof Error) {
-    lines.push(options.debug ? cause.stack ?? cause.message : `caused by: ${cause.message}`)
+    lines.push(options.debug ? cause.stack ?? cause.message : `caused by: ${describe(cause)}`)
     appendProcessDetails(lines, cause)
     return
   }

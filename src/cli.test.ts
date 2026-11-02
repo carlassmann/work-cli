@@ -671,7 +671,9 @@ describe("cli", () => {
         },
       }`)
 
-    const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot })
+    const portlessState = await tempDir("portless-state-")
+    await fs.writeFile(path.join(portlessState, "proxy.port"), "1355\n")
+    const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot, env: { PORTLESS_STATE_DIR: portlessState } })
 
     assert.equal(result.stderr, "")
     assert.equal(result.exitCode, 0)
@@ -680,19 +682,19 @@ describe("cli", () => {
       project: "tilly",
       workspace: "feature-x",
       root: await fs.realpath(path.join(root, "worktrees", "feature-x")),
-      web: "https://web-feature-x-tilly.localhost",
-      sync: "https://sync-feature-x-tilly.localhost",
-      syncWs: "wss://sync-feature-x-tilly.localhost",
+      web: "https://web-feature-x-tilly.localhost:1355",
+      sync: "https://sync-feature-x-tilly.localhost:1355",
+      syncWs: "wss://sync-feature-x-tilly.localhost:1355",
     })
 
     const env = JSON.parse(await fs.readFile(setupFile, "utf8"))
     assert.deepEqual(JSON.parse(env.urls), {
-      web: "https://web-feature-x-tilly.localhost",
-      sync: "https://sync-feature-x-tilly.localhost",
+      web: "https://web-feature-x-tilly.localhost:1355",
+      sync: "https://sync-feature-x-tilly.localhost:1355",
     })
     assert.deepEqual(JSON.parse(env.wsUrls), {
-      web: "wss://web-feature-x-tilly.localhost",
-      sync: "wss://sync-feature-x-tilly.localhost",
+      web: "wss://web-feature-x-tilly.localhost:1355",
+      sync: "wss://sync-feature-x-tilly.localhost:1355",
     })
   })
 

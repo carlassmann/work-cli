@@ -36,6 +36,28 @@ test("waits through startup errors, accepts redirects, and bounds failed or hung
   assert.equal((await waitForUrl("http://127.0.0.1:1", 50)).ok, false)
 })
 
+test("reports which connections a refused probe tried", async () => {
+  const failure = await waitForUrl("http://localhost:1", 100)
+  assert.equal(failure.ok, false)
+  if (!failure.ok) assert.match(failure.error.message, /Last check: connect ECONNREFUSED (::1|127\.0\.0\.1):1/)
+})
+
+test("keeps the last answer instead of probing with almost no time left", async (t) => {
+  let requests = 0
+  const server = createServer((_request, response) => {
+    if (++requests === 1) response.writeHead(503).end()
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const address = server.address()
+  assert.ok(address && typeof address !== "string")
+
+  const failure = await waitForUrl(`http://127.0.0.1:${address.port}`, 300)
+  assert.equal(failure.ok, false)
+  if (!failure.ok) assert.match(failure.error.message, /Last check: HTTP 503$/)
+  assert.equal(requests, 1)
+})
+
 test("stops waiting once the command is gone", async () => {
   const startedAt = performance.now()
   const stopped = await waitForUrl("http://127.0.0.1:1", 10_000, async () => false)

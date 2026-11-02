@@ -8,7 +8,8 @@ import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
-import { commandProcess, commandRoute, portlessUrl, publicUrl, routeEnvironment, routeEnvironmentForConfig, routeUrlsForConfig } from "./portless.js"
+import { portlessLabel } from "./names.js"
+import { commandProcess, commandRoute, portlessPorts, portlessPortsForConfig, portlessUrl, publicUrl, refreshRouteUrl, routeEnvironment, routeEnvironmentForConfig, routeUrlsForConfig } from "./portless.js"
 import { isPidRunning, isTrackedPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
 import type { CommandRecord, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
@@ -67,6 +68,8 @@ export async function startCommand(
   }
 
   const route = commandRoute(config, workspace.workspace, id, command)
+  const ports = await portlessPortsForConfig(config, environment.value)
+  const port = ports[id] ?? 443
   if (exposure.mode !== "local" && command.route === true && !route) {
     return errResult("ProcessError", `command ${id} must use Portless to publish through ${exposure.mode === "cloudflare" ? "Cloudflare Tunnel" : "Tailscale"}`)
   }
@@ -85,7 +88,7 @@ export async function startCommand(
       WORK_PROJECT: config.project,
       WORK_WORKSPACE: workspace.workspace,
       WORK_COMMAND: id,
-      ...routeEnvironmentForConfig(config, workspace.workspace, exposure),
+      ...routeEnvironmentForConfig(config, workspace.workspace, ports, exposure),
       ...command.env,
     },
   })
@@ -102,8 +105,8 @@ export async function startCommand(
     route,
     cwd,
     log,
-    url: publicUrl(config, workspace.workspace, id, command, exposure),
-    localUrl: portlessUrl(config, workspace.workspace, id, command),
+    url: publicUrl(config, workspace.workspace, id, command, exposure, port),
+    localUrl: portlessUrl(config, workspace.workspace, id, command, port),
     exposure,
     ...(backendPort ? { backendPort } : {}),
     ...(command.env ? { env: command.env } : {}),
@@ -124,7 +127,7 @@ export async function startCommand(
   if (config.env) nextState.env = childEnvironment(config.env)
   else delete nextState.env
   nextState.exposure = exposure
-  nextState.urls = routeUrlsForConfig(config, workspace.workspace, exposure)
+  nextState.urls = routeUrlsForConfig(config, workspace.workspace, ports, exposure)
   nextState.commands[id] = record
 
   const write = await writeWorkspaceState(nextState)
@@ -260,7 +263,16 @@ export async function restartTrackedCommand(
   const stopped = await stopTrackedProcess(command)
   if (!stopped.ok) return stopped
 
-  const commandExec = commandProcess(command.run, command.route, command.backendPort)
+  // Recompute what older records or a moved Portless proxy left stale; tailnet and Cloudflare URLs pass through.
+  const recordedUrls = stateRouteUrls(state)
+  const ports = await portlessPorts({ ...state.env, ...environment.value }, Object.fromEntries(
+    [...new Set([...Object.keys(recordedUrls), ...(command.url || command.localUrl ? [id] : [])])].map((other) => [other, state.commands[other]?.env]),
+  ))
+  const urls = Object.fromEntries(Object.entries(recordedUrls).map(([other, url]) => [other, refreshRouteUrl(url, ports[other] ?? 443)]))
+  const route = command.route ? portlessLabel(command.route) : null
+  const port = ports[id] ?? 443
+
+  const commandExec = commandProcess(command.run, route, command.backendPort)
   if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
   const pid = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
@@ -270,7 +282,7 @@ export async function restartTrackedCommand(
       WORK_PROJECT: project,
       WORK_WORKSPACE: workspace,
       WORK_COMMAND: id,
-      ...routeEnvironment(stateRouteUrls(state)),
+      ...routeEnvironment(urls),
       ...command.env,
     },
   })
@@ -278,6 +290,9 @@ export async function restartTrackedCommand(
 
   const record: CommandRecord = {
     ...command,
+    route,
+    url: command.url ? refreshRouteUrl(command.url, port) : command.url,
+    ...(command.localUrl ? { localUrl: refreshRouteUrl(command.localUrl, port) } : {}),
     pid: pid.value,
     command: commandExec.display,
     startedAt: new Date().toISOString(),
@@ -291,6 +306,7 @@ export async function restartTrackedCommand(
   }
 
   state.commands[id] = record
+  if (state.urls) state.urls = urls
   const write = await writeWorkspaceState(state)
   if (!write.ok) {
     await stopProcessTree(pid.value)

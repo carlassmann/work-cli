@@ -1,6 +1,9 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { commandProcess, commandRoute, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { commandProcess, commandRoute, portlessPortsForConfig, refreshRouteUrl, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
+import { tempDir } from "./test-helpers.js"
 import type { DevConfig } from "./types.js"
 
 const config: DevConfig = {
@@ -67,7 +70,7 @@ describe("portless", () => {
         sync: { run: "bun run sync", route: true },
         worker: { run: "bun run worker" },
       },
-    }, "feature-x")
+    }, "feature-x", { web: 443, sync: 443 })
 
     assert.equal(env.WORK_URL, "https://web-feature-x-tilly.localhost")
     assert.equal(env.WORK_WEB_URL, "https://web-feature-x-tilly.localhost")
@@ -84,6 +87,44 @@ describe("portless", () => {
     })
   })
 
+  test("exports URLs that Portless serves on a non-default port", () => {
+    const workspace = "ruler-fix-tabs-size-strip-instead-of-touch-t"
+    const command = { run: "bun run preview", route: true }
+    const env = routeEnvironmentForConfig({ project: "syntwin-mono", commands: { web: { run: "bun run dev", route: true }, preview: command } }, workspace, { web: 1355, preview: 1355 })
+
+    assert.equal(env.WORK_WEB_URL, `https://web-${workspace}-syntwin-mono.localhost:1355`)
+    assert.equal(env.WORK_WEB_WS_URL, `wss://web-${workspace}-syntwin-mono.localhost:1355`)
+    assert.equal(env.WORK_PREVIEW_URL, `https://preview-${workspace}-syn-154ac3.localhost:1355`)
+    assert.equal(commandRoute({ project: "syntwin-mono", commands: {} }, workspace, "preview", command), `preview-${workspace}-syn-154ac3`)
+  })
+
+  test("resolves each routed command's port with its own env overrides", async () => {
+    const stateDir = async (port: number) => {
+      const dir = await tempDir("portless-state-")
+      await fs.writeFile(path.join(dir, "proxy.port"), `${port}\n`)
+      return dir
+    }
+    const ports = await portlessPortsForConfig({
+      project: "tilly",
+      env: { PORTLESS_STATE_DIR: await stateDir(1355) },
+      commands: {
+        web: { run: "bun run dev", route: true },
+        api: { run: "bun run api", route: true, env: { PORTLESS_STATE_DIR: await stateDir(8443) } },
+        worker: { run: "bun run worker" },
+      },
+    }, { PORTLESS_PORT: "9" })
+
+    assert.deepEqual(ports, { web: 1355, api: 8443 })
+  })
+
+  test("refreshes recorded localhost URLs and leaves external ones alone", () => {
+    assert.equal(refreshRouteUrl("https://web-main-demo.localhost", 1355), "https://web-main-demo.localhost:1355")
+    assert.equal(refreshRouteUrl("https://web-main-demo.localhost:1355", 443), "https://web-main-demo.localhost")
+    assert.equal(refreshRouteUrl("https://preview-ruler-fix-tabs-size-strip-instead-of-touch-t-syntwin-mono.localhost", 1355), "https://preview-ruler-fix-tabs-size-strip-instead-of-touch-t-syn-154ac3.localhost:1355")
+    assert.equal(refreshRouteUrl("https://web-main-demo.dev.example.com", 1355), "https://web-main-demo.dev.example.com")
+    assert.equal(refreshRouteUrl("https://cbook-web-main-demo.example.com", 1355), "https://cbook-web-main-demo.example.com")
+  })
+
   test("converts http URLs to websocket URLs", () => {
     assert.equal(websocketUrl("http://web.local"), "ws://web.local")
     assert.equal(websocketUrl("https://web.local"), "wss://web.local")
@@ -96,7 +137,7 @@ describe("portless", () => {
         web: { run: "bun run dev", route: true },
         sync: { run: "bun run sync", route: true },
       },
-    }, "feature-x", {
+    }, "feature-x", { web: 1355, sync: 1355 }, {
       mode: "cloudflare",
       machine: "cbook",
       domain: "example.com",
