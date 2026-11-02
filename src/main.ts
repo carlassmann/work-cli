@@ -767,11 +767,11 @@ async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", "missing command. Usage: work stop [workspace] <id>... | work stop -w workspace <id>...")
   }
 
-  const targets = await stopTargets(parsed.value.positional, parsed.value.flags)
-  if (!targets.ok) return targets
+  const resolved = await stopTargets(parsed.value.positional, parsed.value.flags)
+  if (!resolved.ok) return resolved
 
-  const missing = []
-  for (const target of targets.value) {
+  const missing = [...resolved.value.missing]
+  for (const target of resolved.value.targets) {
     const response = await callDaemon({ type: "stop", ...target, environment: childEnvironment() })
     if (!response.ok) return response
 
@@ -788,12 +788,21 @@ async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
 async function stopTargets(
   positional: ReadonlyArray<string>,
   flags: { project: string | undefined; workspace: string | undefined },
-): Promise<Result<Array<{ project: string; workspace: string; command: string }>>> {
+): Promise<Result<{ targets: Array<{ project: string; workspace: string; command: string }>; missing: Array<string> }>> {
   const ctx = await loadProjectContext()
   if (!ctx.ok || flags.project) {
     const target = await trackedWorkspaceCommands(positional, flags)
     if (!target.ok) return target
-    return resolveTrackedCommands(target.value, flags.project)
+
+    const targets = []
+    const missing = []
+    for (const command of target.value.commands) {
+      const match = await resolveTrackedCommand(command, { project: flags.project, workspace: target.value.workspace })
+      if (match.ok) targets.push(match.value)
+      else if (match.error.tag === "CLIError") missing.push(match.error.message)
+      else return match
+    }
+    return ok({ targets, missing })
   }
 
   const project = ctx.value.config.project
@@ -801,7 +810,7 @@ async function stopTargets(
   const commandIds = await commandCandidates(project, current, Object.keys(ctx.value.config.commands))
   const target = await projectWorkspaceCommands(ctx.value, positional, flags.workspace, commandIds)
   const workspace = target.workspace ? slugify(target.workspace) : current
-  return ok(target.commands.map((command) => ({ project, workspace, command })))
+  return ok({ targets: target.commands.map((command) => ({ project, workspace, command })), missing: [] })
 }
 
 async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {

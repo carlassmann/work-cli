@@ -740,6 +740,31 @@ describe("cli", () => {
     assert.ok(result.stderr.includes("no tracked command: main/gone"))
   })
 
+  test("stop by tracked state stops what it finds and reports every missing id", async () => {
+    const root = await tempDir()
+    const project = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const statePath = path.join(stateRoot, "projects", "demo", "workspaces", "main", "state.json")
+
+    await initGitRepo(project)
+    await writeFile(path.join(project, "work.config.js"), `export default {
+      project: "demo",
+      commands: { web: { run: "echo web" } },
+    }`)
+
+    for (const [cwd, args] of [[root, ["stop", "web", "missing", "also-missing"]], [project, ["stop", "-p", "demo", "-w", "main", "web", "missing"]]] as const) {
+      await writeTrackedState(stateRoot, root, "demo", "main", ["web"], 99999999)
+
+      const result = await runCli([...args], { cwd, stateRoot })
+      assert.equal(result.exitCode, 1)
+      assert.equal(result.stdout, "stopped demo/main/web\n")
+      for (const id of args.slice(args.indexOf("web") + 1)) {
+        assert.ok(result.stderr.includes(`no tracked command: ${id}`), result.stderr)
+      }
+      assert.deepEqual(JSON.parse(await fs.readFile(statePath, "utf8")).commands, {})
+    }
+  })
+
   test("stop and restart take several ids outside a project", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
