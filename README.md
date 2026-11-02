@@ -308,7 +308,8 @@ work up image-uploads --create
 # Or just create a clean worktree without setup or servers.
 work create refactor-sidebar
 
-# Need to debug? Tail the sync server logs.
+# Need to debug? Tail the sync server logs. work logs shows the current run;
+# -n 50 keeps the last lines, --all includes earlier runs.
 work logs -f -w chat-streaming sync
 
 # Changed shared code? Restart both servers in one go.
@@ -330,9 +331,34 @@ work urls         # routed URLs for the current workspace
 work doctor       # diagnose anything broken
 ```
 
+`work up`, `run` and `restart` watch fresh commands for 1.5 seconds. A command that
+exits in that time is reported as `failed` with its exit status and the last lines
+of this run, and `work` exits non-zero. An exit with code 0 prints `exited` instead:
+
+```
+failed web pid=41213 exited with code 1
+  Error: listen EADDRINUSE: address already in use :::3000
+web exited right after starting. Logs: work logs -p my-app -w main web
+```
+
 For scripts and agents, `work ps --json` (or `status --json`) and `work urls --json`
 print arrays of `{ project, workspace, command, ... }` objects. They leave out stored
 environments and credentials, and print `[]` when nothing matches.
+
+Every start writes a `── work: start <command> <time>` line into the command's log,
+and `work logs` prints only the output since then. `-n 50` keeps the last lines,
+`--all` includes earlier runs. Logs stay readable after a crash: workd keeps the
+dead record with its exit code until the command starts again, `work stop`,
+`work down`, or `work prune`, so `work ps` shows `dead (exit 1, 12:04:31)`.
+
+Commands without a URL can say when they are ready:
+
+```js
+convex: { run: "bunx convex dev", ready: { log: "Convex functions ready" } },
+```
+
+`work wait convex` then waits for a matching line in the current run.
+`work wait <command> --log <regex>` does the same ad hoc.
 
 ### Adopting a worktree created by another tool
 

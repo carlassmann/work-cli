@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import fs from "node:fs/promises"
 import path from "node:path"
 import readline from "node:readline/promises"
 import { spawn } from "node:child_process"
@@ -15,8 +14,10 @@ import { complete, completionScript, shellInitScript } from "./completions.js"
 import { createConfig, loadConfig } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
-import { commandRuntimeStatus } from "./processes.js"
-import { waitForUrl } from "./readiness.js"
+import { commandRuntimeStatus, startupExits } from "./processes.js"
+import type { StartupExit } from "./processes.js"
+import { waitForLog, waitForUrl } from "./readiness.js"
+import { MAX_TAIL_BYTES, currentRunOffset, forEachLogChunk, readLastLines } from "./logs.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
@@ -30,7 +31,7 @@ import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import type { DaemonStatus } from "./daemon-client.js"
 import { processUnit, sessionScope } from "./systemd.js"
-import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
+import { debugLog, errResult, formatError, ok } from "./result.js"
 import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
 import type { Result } from "./result.js"
 import type { CommandName } from "./commands.js"
@@ -469,6 +470,8 @@ async function startConfigured(
   const routed = entries.filter(([, command]) => usesPortless(command))
   const proxy = await ensurePortlessProxy(await portlessEndpoints({ ...ctx.config.env, ...environment }, Object.fromEntries(routed.map(([id, command]) => [id, command.env]))))
   if (!proxy.ok) return proxy
+
+  const starts: Array<ProcessStart> = []
   for (const [id] of entries) {
     const response = await callDaemon({
       type,
@@ -478,12 +481,19 @@ async function startConfigured(
       exposure,
       environment: childEnvironment(),
     })
-    if (!response.ok) return response
-    printProcessStart(id, response.value.data, type === "restart" ? "restarted" : undefined)
+    if (!response.ok) return reportStarts(starts, response)
+    starts.push({
+      label: id,
+      target: { project: ctx.config.project, workspace: workspace.workspace, command: id },
+      result: response.value.data,
+      verb: type === "restart" ? "restarted" : undefined,
+    })
   }
 
-  return ok(undefined)
+  return reportStarts(starts)
 }
+
+type TrackedTarget = { project: string; workspace: string; command: string }
 
 async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Result<void>> {
   const targets = states.flatMap((state) =>
@@ -498,20 +508,24 @@ async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Resu
   return restartTrackedTargets(targets)
 }
 
-type TrackedTarget = { project: string; workspace: string; command: string }
-
 // Checks the proxy for the whole batch before restarting anything, so a stopped proxy
-// leaves every command as it was.
+// leaves every command as it was. Early exits are then watched once for the whole batch.
 async function restartTrackedTargets(targets: Array<TrackedTarget>): Promise<Result<void>> {
   const proxy = await ensureTrackedPortlessProxy(targets)
   if (!proxy.ok) return proxy
 
+  const starts: Array<ProcessStart> = []
   for (const target of targets) {
-    const result = await restartTracked(target)
-    if (!result.ok) return result
+    const response = await callDaemon({
+      type: "restartTracked",
+      ...target,
+      environment: childEnvironment(),
+    })
+    if (!response.ok) return reportStarts(starts, response)
+    starts.push({ label: `${target.project}/${target.workspace}/${target.command}`, target, result: response.value.data, verb: "restarted" })
   }
 
-  return ok(undefined)
+  return reportStarts(starts)
 }
 
 async function ensureTrackedPortlessProxy(targets: Array<TrackedTarget>): Promise<Result<void>> {
@@ -539,16 +553,26 @@ async function ensureTrackedPortlessProxy(targets: Array<TrackedTarget>): Promis
   return ensurePortlessProxy(routed)
 }
 
-async function restartTracked(target: { project: string; workspace: string; command: string }): Promise<Result<void>> {
-  const response = await callDaemon({
-    type: "restartTracked",
-    ...target,
-    environment: childEnvironment(),
-  })
-  if (!response.ok) return response
+type ProcessStart = { label: string; target: TrackedTarget; result: StartResult; verb?: string | undefined }
 
-  printProcessStart(`${target.project}/${target.workspace}/${target.command}`, response.value.data, "restarted")
-  return ok(undefined)
+async function reportStarts(starts: Array<ProcessStart>, failure: Result<unknown> = ok(undefined)): Promise<Result<void>> {
+  const exits = await startupExits(starts.map((start) => start.result))
+  const failed: Array<ProcessStart> = []
+
+  for (const start of starts) {
+    const exit = exits.get(start.result.record.pid)
+    if (!exit) {
+      printProcessStart(start.label, start.result, start.verb)
+      continue
+    }
+    printStartupExit(start.label, start.result.record.pid, exit)
+    if (exit.code !== 0) failed.push(start)
+  }
+
+  if (!failure.ok) return failure
+  if (failed.length === 0) return ok(undefined)
+  return errResult("ProcessError", failed.map(({ label, target }) =>
+    `${label} exited right after starting. Logs: work logs -p ${target.project} -w ${target.workspace} ${target.command}`).join("\n"))
 }
 
 async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -622,6 +646,9 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
         status: await commandRuntimeStatus(command),
         pid: command.pid,
         url: command.url ?? null,
+        exitCode: command.exitCode ?? null,
+        exitSignal: command.exitSignal ?? null,
+        exitedAt: command.exitedAt ?? null,
       })
     }
   }
@@ -631,8 +658,21 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
     return ok(scope.value.empty)
   }
 
-  const rows = records.map((record) => [record.status, `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
+  const rows = records.map((record) => [statusLabel(record), `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
   return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
+}
+
+function statusLabel(record: { status: string; exitCode: number | null; exitSignal: string | null; exitedAt: string | null }) {
+  if (!record.exitedAt) return record.status
+  const exit = record.exitSignal ?? (record.exitCode === null ? null : `exit ${record.exitCode}`)
+  return `${record.status} (${exit ? `${exit}, ` : ""}${formatExitTime(new Date(record.exitedAt))})`
+}
+
+function formatExitTime(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  if (date.toDateString() === new Date().toDateString()) return time
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}`
 }
 
 function interruptibleSleep(ms: number, stopped: () => boolean): Promise<void> {
@@ -681,15 +721,28 @@ function formatTable(rows: Array<Array<string>>): string {
 
 async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { follow: booleanFlag("f"), project: valueFlag("p"), workspace: valueFlag("w") },
+    flags: {
+      follow: booleanFlag("f"),
+      all: booleanFlag("a"),
+      tail: valueFlag("n"),
+      lines: valueFlag(),
+      project: valueFlag("p"),
+      workspace: valueFlag("w"),
+    },
   })
   if (!parsed.ok) return parsed
+
+  const tailRaw = parsed.value.flags.tail ?? parsed.value.flags.lines
+  const tail = tailRaw === undefined ? undefined : Number(tailRaw)
+  if (tail !== undefined && (!Number.isInteger(tail) || tail < 0)) {
+    return errResult("CLIError", `invalid line count: ${tailRaw}`)
+  }
 
   const parsedTarget = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
   if (!parsedTarget.ok) return parsedTarget
   const command = parsedTarget.value.command
   if (!command) {
-    return errResult("CLIError", "missing command. Usage: work logs [-f] [workspace] <command> | work logs [-f] -w workspace <command>")
+    return errResult("CLIError", "missing command. Usage: work logs [-f] [-n lines] [--all] [workspace] <command> | work logs [-f] -w workspace <command>")
   }
 
   const ctx = await loadProjectContext()
@@ -706,34 +759,45 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
       project: parsed.value.flags.project,
       workspace: parsedTarget.value.workspace,
     })
-    if (!target.ok) return target
-    resolved = target.value
+    const untracked = parsed.value.flags.project && parsedTarget.value.workspace
+      ? { project: slugify(parsed.value.flags.project), workspace: slugify(parsedTarget.value.workspace), command }
+      : null
+    if (target.ok) resolved = target.value
+    else if (untracked && await existsAt(commandLogFile(untracked.project, untracked.workspace, command))) resolved = untracked
+    else return target
   }
 
   const stateResult = await readWorkspaceState(resolved.project, resolved.workspace)
   if (!stateResult.ok) return stateResult
 
+  // Pruned or never-tracked commands still have their log file.
   const record = stateResult.value?.commands[resolved.command]
-  if (!record) {
-    return errResult("CLIError", withSuggestion(`no log for ${resolved.workspace}/${resolved.command}`, resolved.command, await commandCandidates(resolved.project, resolved.workspace, ctx.ok ? Object.keys(ctx.value.config.commands) : [])))
-  }
-
   const logFile = record?.log ?? commandLogFile(resolved.project, resolved.workspace, resolved.command)
 
   if (!await existsAt(logFile)) {
-    return errResult("CLIError", `no log for ${resolved.workspace}/${resolved.command}`)
+    return errResult("CLIError", withSuggestion(`no log for ${resolved.workspace}/${resolved.command}`, resolved.command, await commandCandidates(resolved.project, resolved.workspace, ctx.ok ? Object.keys(ctx.value.config.commands) : [])))
   }
 
-  if (!parsed.value.flags.follow) {
-    const read = await tryAsync("IOError", `failed to read log ${logFile}`, async () =>
-      await fs.readFile(logFile, "utf8"),
-    )
-    if (!read.ok) return read
-    process.stdout.write(read.value)
-    return ok(undefined)
+  const offset = parsed.value.flags.all ? ok(0) : await currentRunOffset(logFile, record?.logOffset)
+  if (!offset.ok) return offset
+
+  if (tail === undefined) {
+    if (parsed.value.flags.follow) return followLog(logFile, offset.value)
+    // Waiting for each write keeps memory bounded when stdout is a slow pipe.
+    // A closed pipe (work logs web | head) stops the read instead of crashing on EPIPE.
+    const closed = () => undefined
+    process.stdout.on("error", closed)
+    const printed = await forEachLogChunk(logFile, offset.value, (chunk) =>
+      new Promise<boolean>((resolve) => process.stdout.write(chunk, (error) => resolve(Boolean(error)))))
+    process.stdout.off("error", closed)
+    return printed.ok ? ok(undefined) : printed
   }
 
-  return followLog(logFile)
+  const read = await readLastLines(logFile, offset.value, tail)
+  if (!read.ok) return read
+  if (read.value.truncated) console.error(`work logs: showing only the last ${MAX_TAIL_BYTES / 1024 / 1024} MiB of the requested lines`)
+  process.stdout.write(read.value.data)
+  return parsed.value.flags.follow ? followLog(logFile, read.value.end) : ok(undefined)
 }
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -754,7 +818,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
 
     const rows = states.value.flatMap((state) =>
       Object.values(state.commands)
-        .filter((command) => command.url)
+        .filter((command) => command.url && !command.exitedAt)
         .map((command) => [`${state.project}/${state.workspace}`, command.id, command.url ?? ""]),
     )
 
@@ -777,7 +841,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   const rows: Array<Array<string>> = []
 
   for (const command of Object.values(stateResult.value?.commands ?? {})) {
-    if (command.url) {
+    if (command.url && !command.exitedAt) {
       rows.push([workspace, command.id, command.url])
     }
   }
@@ -793,7 +857,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 function urlsJson(states: Array<WorkspaceState>): string {
   return JSON.stringify(states.flatMap((state) => Object.values(state.commands)
-    .filter((command) => command.url)
+    .filter((command) => command.url && !command.exitedAt)
     .map((command) => ({ project: state.project, workspace: state.workspace, command: command.id, url: command.url }))))
 }
 
@@ -852,7 +916,7 @@ async function stopTargets(
 
 async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { project: valueFlag("p"), workspace: valueFlag("w"), timeout: valueFlag() },
+    flags: { project: valueFlag("p"), workspace: valueFlag("w"), timeout: valueFlag(), log: valueFlag() },
   })
   if (!parsed.ok) return parsed
 
@@ -860,6 +924,8 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!Number.isFinite(timeout) || timeout <= 0) {
     return errResult("CLIError", `invalid timeout: ${parsed.value.flags.timeout}`)
   }
+  const logFlag = parsed.value.flags.log === undefined ? ok(undefined) : logPattern(parsed.value.flags.log, "--log")
+  if (!logFlag.ok) return logFlag
 
   const target = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "wait")
   if (!target.ok) return target
@@ -868,21 +934,59 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!state.ok) return state
   const record = state.value?.commands[command]
   if (!record) return errResult("CLIError", `no tracked command: ${workspace}/${command}`)
-  if (!record.url) return errResult("CLIError", `no URL for ${workspace}/${command}; enable routing for this command`)
+  const configured = !logFlag.value && record.ready ? logPattern(record.ready.log, "ready.log") : ok(undefined)
+  if (!configured.ok) return configured
+  const pattern = logFlag.value ?? configured.value
+  if (!record.url && !pattern) {
+    return errResult("CLIError", `no URL or ready.log for ${workspace}/${command}; enable routing, set ready: { log: "<regex>" }, or pass --log <regex>`)
+  }
 
-  const isAlive = async () => {
+  const trackedRecord = async () => {
     const current = await readWorkspaceState(project, workspace)
-    const tracked = current.ok ? current.value?.commands[command] : undefined
+    return current.ok ? current.value?.commands[command] : undefined
+  }
+  const isAlive = async () => {
+    const tracked = await trackedRecord()
     if (!tracked) return false
     // workd restarts on-exit commands itself, so a dead pid may be replaced shortly.
     return tracked.restart === "on-exit" || await commandRuntimeStatus(tracked) === "up"
   }
+  const logsHint = `Logs: work logs -p ${project} -w ${workspace} ${command}`
+  const deadline = performance.now() + timeout * 1_000
+
+  if (pattern) {
+    let run: { id: string; offset: number } | undefined
+    const currentRun = async (): Promise<Result<{ id: string; offset: number }>> => {
+      const tracked = await trackedRecord() ?? record
+      if (run?.id === tracked.startedAt) return ok(run)
+      const offset = await currentRunOffset(tracked.log, tracked.logOffset)
+      if (!offset.ok) return offset
+      run = { id: tracked.startedAt, offset: offset.value }
+      return ok(run)
+    }
+    const matched = await waitForLog(record.log, pattern, timeout * 1_000, currentRun, isAlive)
+    if (!matched.ok) return errResult("ProcessError", `${workspace}/${command} ${matched.error.message}. ${logsHint}`)
+    if (!record.url) {
+      console.log(matched.value)
+      return ok(undefined)
+    }
+  }
+
+  if (!record.url) return ok(undefined)
   // A tailnet URL resolves to this machine's tailnet address, which only other devices reach.
   const probeUrl = record.exposure?.mode === "tailscale" ? record.localUrl ?? record.url : record.url
-  const ready = await waitForUrl(probeUrl, timeout * 1_000, isAlive)
-  if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. Logs: work logs -p ${project} -w ${workspace} ${command}`)
+  const ready = await waitForUrl(probeUrl, Math.max(1, deadline - performance.now()), isAlive)
+  if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. ${logsHint}`)
   console.log(record.url)
   return ok(undefined)
+}
+
+function logPattern(source: string, field: string): Result<RegExp> {
+  try {
+    return ok(new RegExp(source))
+  } catch (cause) {
+    return errResult("CLIError", `invalid ${field} regular expression: ${source}`, cause)
+  }
 }
 
 async function runTailscale(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -1307,15 +1411,10 @@ async function workspaceExists(ctx: ProjectContext, name: string) {
   return (current.ok && current.value === workspace) || await existsAt(worktreePath(ctx, workspace))
 }
 
-async function followLog(file: string): Promise<Result<void>> {
-  const prep = await tryAsync("IOError", `failed to prepare log ${file}`, async () => {
-    await fs.mkdir(path.dirname(file), { recursive: true })
-    await fs.appendFile(file, "")
-  })
-  if (!prep.ok) return prep
-
+async function followLog(file: string, offset: number): Promise<Result<void>> {
   return new Promise((resolve) => {
-    const tail = spawn("tail", ["-n", "+1", "-f", file], {
+    // -F keeps following when a restart rotates the log to a new file.
+    const tail = spawn("tail", ["-c", `+${offset + 1}`, "-F", file], {
       stdio: "inherit",
     })
 
@@ -1424,6 +1523,17 @@ async function resolveExposure(
 
 function printProcessStart(command: string, result: StartResult, verb = result.started ? "started" : "already up") {
   console.log(`${verb} ${command} pid=${result.record.pid}${result.record.url ? ` ${result.record.url}` : ""}`)
+}
+
+function printStartupExit(command: string, pid: number, exit: StartupExit) {
+  if (exit.code === 0) {
+    console.log(`exited ${command} pid=${pid} with code 0`)
+    return
+  }
+
+  const status = exit.signal ? ` on ${exit.signal}` : exit.code === null ? "" : ` with code ${exit.code}`
+  console.log(`failed ${command} pid=${pid} exited${status}`)
+  for (const line of exit.tail.length > 0 ? exit.tail : ["(no output)"]) console.log(`  ${line}`)
 }
 
 function unexpectedPositional(positional: ReadonlyArray<string>, count: number): Result<never> | null {

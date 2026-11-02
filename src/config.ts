@@ -208,6 +208,9 @@ function validateCommand(id: string, command: DevConfig["commands"][string]): Re
     return errResult("ConfigError", `command ${id}.restart must be "manual" or "on-exit"`)
   }
 
+  const ready = validateReady(id, command.ready)
+  if (!ready.ok) return ready
+
   if (command.restartWhenChanged && !Array.isArray(command.restartWhenChanged)) {
     return errResult("ConfigError", `command ${id}.restartWhenChanged must be an array`)
   }
@@ -231,6 +234,26 @@ function validateCommand(id: string, command: DevConfig["commands"][string]): Re
 
   if (command.portless !== undefined && typeof command.portless !== "boolean") {
     return errResult("ConfigError", `command ${id}.portless must be a boolean`)
+  }
+
+  return ok(undefined)
+}
+
+function validateReady(id: string, ready: DevConfig["commands"][string]["ready"]): Result<void> {
+  if (ready === undefined) return ok(undefined)
+
+  if (!ready || typeof ready !== "object" || Array.isArray(ready)) {
+    return errResult("ConfigError", `command ${id}.ready must be an object`)
+  }
+
+  if (typeof ready.log !== "string" || ready.log.length === 0) {
+    return errResult("ConfigError", `command ${id}.ready.log must be a non-empty regular expression string`)
+  }
+
+  try {
+    new RegExp(ready.log)
+  } catch (cause) {
+    return errResult("ConfigError", `command ${id}.ready.log is not a valid regular expression`, cause)
   }
 
   return ok(undefined)

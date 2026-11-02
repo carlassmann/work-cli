@@ -1,5 +1,9 @@
 type RestartPolicy = "manual" | "on-exit"
 
+type ReadyCheck = {
+  log: string
+}
+
 export type CommandConfig = {
   run: string
   label?: string
@@ -7,6 +11,7 @@ export type CommandConfig = {
   env?: Record<string, string>
   autoStart?: boolean
   restart?: RestartPolicy
+  ready?: ReadyCheck
   restartWhenChanged?: Array<string>
   route?: boolean
   routeName?: string
@@ -63,10 +68,15 @@ export type CommandRecord = {
   backendPort?: number
   env?: Record<string, string>
   restart?: RestartPolicy
+  ready?: ReadyCheck
   startedAt: string
+  logOffset?: number
   maxTtlSeconds?: number
   ttlStartedAt?: string
   pid: number
+  exitedAt?: string
+  exitCode?: number
+  exitSignal?: string
 }
 
 export type WorkspaceState = WorkspaceRecord & {
@@ -77,7 +87,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 10
+export const DAEMON_PROTOCOL_VERSION = 11
 
 export type DaemonCommand =
   | {

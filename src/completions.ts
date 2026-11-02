@@ -307,10 +307,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval|--timeout)
+      -w|--workspace|-p|--project|-n|--interval|--tail|--lines|--timeout|--log)
         (( i += 2 ))
         ;;
-      --workspace=*|--project=*|--interval=*|--timeout=*)
+      --workspace=*|--project=*|--interval=*|--tail=*|--lines=*|--timeout=*|--log=*)
         (( i++ ))
         ;;
       -*)
@@ -338,10 +338,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval|--timeout)
+      -p|--project|-n|--interval|--tail|--lines|--timeout|--log)
         (( i += 2 ))
         ;;
-      --project=*|--interval=*|--timeout=*)
+      --project=*|--interval=*|--tail=*|--lines=*|--timeout=*|--log=*)
         (( i++ ))
         ;;
       *)
@@ -529,10 +529,10 @@ _work_positional_index() {
       --)
         break
         ;;
-      -w|--workspace|-p|--project|-n|--interval|--timeout)
+      -w|--workspace|-p|--project|-n|--interval|--tail|--lines|--timeout|--log)
         i=$((i + 2))
         ;;
-      --workspace=*|--project=*|--interval=*|--timeout=*)
+      --workspace=*|--project=*|--interval=*|--tail=*|--lines=*|--timeout=*|--log=*)
         i=$((i + 1))
         ;;
       -*)
@@ -560,10 +560,10 @@ _work_has_workspace_flag() {
         echo 1
         return
         ;;
-      -p|--project|-n|--interval|--timeout)
+      -p|--project|-n|--interval|--tail|--lines|--timeout|--log)
         i=$((i + 2))
         ;;
-      --project=*|--interval=*|--timeout=*)
+      --project=*|--interval=*|--tail=*|--lines=*|--timeout=*|--log=*)
         i=$((i + 1))
         ;;
       *)
