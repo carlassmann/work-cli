@@ -27,6 +27,7 @@ import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
 import type { DaemonStatus } from "./daemon-client.js"
+import { processUnit, sessionScope } from "./systemd.js"
 import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
 import type { Result } from "./result.js"
@@ -875,7 +876,10 @@ async function runDoctor(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   console.log(await tailscaleDoctorLine(environment.ok ? environment.value : process.env))
 
-  console.log(["workd", ...daemonStatusFields(await daemonStatus(), "ok")].join("\t"))
+  const daemon = await daemonStatus()
+  const unit = await daemonUnit(daemon)
+  console.log(["workd", ...daemonStatusFields(daemon, "ok", unit)].join("\t"))
+  if (sessionScope(unit)) console.log(`workd\twarning\t${sessionScopeWarning(unit)}`)
 
   if (config?.ok) {
     for (const [id, command] of Object.entries(config.value.commands)) {
@@ -937,7 +941,10 @@ async function runDaemon(args: ReadonlyArray<string>): Promise<Result<void>> {
     }
 
     case "status": {
-      console.log(["workd", ...daemonStatusFields(await daemonStatus(), "running")].join(" "))
+      const status = await daemonStatus()
+      const unit = await daemonUnit(status)
+      console.log(["workd", ...daemonStatusFields(status, "running", unit)].join(" "))
+      if (sessionScope(unit)) console.log(`warning: ${sessionScopeWarning(unit)}`)
       return ok(undefined)
     }
 
@@ -955,10 +962,18 @@ async function portlessDoctorLine(needed: boolean, environment: NodeJS.ProcessEn
   return `portless\tblocked\t:${proxy.port} answers without X-Portless; another proxy owns the port`
 }
 
-function daemonStatusFields(status: DaemonStatus, runningLabel: string) {
-  if (status.running) return [runningLabel, `pid=${status.pid}`]
+function daemonStatusFields(status: DaemonStatus, runningLabel: string, unit: string | null) {
+  if (status.running) return [runningLabel, `pid=${status.pid}`, ...(unit ? [`unit=${unit}`] : [])]
   if (status.outdated) return ["outdated", `pid=${status.pid} runs an older build; the next work command replaces it`]
   return ["stopped"]
+}
+
+async function daemonUnit(status: DaemonStatus) {
+  return status.running && status.pid !== null && process.platform === "linux" ? processUnit(status.pid) : null
+}
+
+function sessionScopeWarning(unit: string | null) {
+  return `workd runs inside ${unit} and dies with it, taking its commands along; move it with: work daemon stop && work daemon start, then work restart --all in each worktree`
 }
 
 async function runDocs(args: ReadonlyArray<string>): Promise<Result<void>> {

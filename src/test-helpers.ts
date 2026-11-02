@@ -35,6 +35,8 @@ export async function runCli(args: Array<string>, options: { cwd: string; stateR
     ...process.env,
     WORK_STATE_ROOT: options.stateRoot ?? await tempDir("work-cli-state-"),
     XDG_CONFIG_HOME: await tempDir("work-cli-config-"),
+    // These tests do not stop the workd they start; keep it out of a systemd scope that would outlive them.
+    WORK_DAEMON_SYSTEMD: "0",
     ...options.env,
   }
 

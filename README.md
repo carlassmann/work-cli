@@ -257,6 +257,15 @@ TTL requires a running daemon.
 
 <!-- written with gpt-6 in codex -->
 
+On Linux with a systemd user session, the CLI starts workd in its own transient
+scope (`work-workd-<hash>-<time>.scope`) via `systemd-run --user --scope`. Without
+it, workd stays in the cgroup of the terminal, IDE or agent thread that started it,
+and systemd kills workd and all its commands when that session ends. The scope
+inherits the caller's environment like a plain child would. If `systemd-run` is
+missing or fails, workd starts as a detached child as before; `WORK_DAEMON_SYSTEMD=0`
+forces that. `work daemon status` and `work doctor` print the unit workd runs in
+and warn when it is another session's scope.
+
 `bun run build` stamps the Git commit into the CLI. `work --version` shows it;
 `-dirty` means the build includes uncommitted changes. Builds without Git metadata
 show an unknown commit and skip update checks.

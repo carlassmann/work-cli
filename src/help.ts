@@ -399,6 +399,7 @@ Checks:
   worktrees.setup
   whether portless is installed and its proxy answers when routed commands need it
   Cloudflare Tunnel configuration when environment variables are set
+  whether workd runs, and on Linux the systemd unit it runs in
   command start mode and route mode`,
 
   prune: `work prune
@@ -424,6 +425,10 @@ Behavior:
   workd owns configured command start/stop/restart.
   Commands with restart: "on-exit" are restarted when they die while workd runs.
   Stopping workd leaves tracked commands running; use work stop or work down to stop them.
+  On Linux with a systemd user session, workd starts in its own scope
+  (work-workd-*.scope), so it and its commands outlive the terminal or agent
+  session that started it. WORK_DAEMON_SYSTEMD=0 starts it as a plain child instead.
+  work daemon status warns when workd runs inside another session's scope.
 
 Examples:
   work daemon status
