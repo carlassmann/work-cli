@@ -187,6 +187,15 @@ Manual lifecycle:
 Stopping workd leaves tracked commands running. Use work stop or work down to stop them.
 After an upgrade, work daemon status reports a workd from the older build as outdated; the next command replaces it.
 
+On Linux with a systemd user session, workd starts in its own transient scope
+(work-workd-<state hash>-<time>.scope) through systemd-run. Otherwise it would stay in
+the cgroup of whatever started it, and systemd kills that cgroup, with workd and every
+command it supervises, when the terminal, IDE or agent session ends. The scope keeps the
+caller's environment. When systemd-run is missing or fails, workd starts as a plain
+detached child. WORK_DAEMON_SYSTEMD=0 skips systemd.
+work daemon status and work doctor show the unit and warn when workd runs inside
+another session's scope.
+
 What workd owns:
   starting commands
   stopping commands

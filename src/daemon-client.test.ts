@@ -4,9 +4,10 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import path from "node:path"
 import { callDaemon, daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
-import { daemonPidFile, daemonSocketFile, readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { daemonLockFile, daemonPidFile, daemonSocketFile, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { commandRuntimeStatus } from "./processes.js"
 import { isPidRunning } from "./shell.js"
+import { processUnit, sessionScope, systemdUserManagerAvailable, workdUnitName } from "./systemd.js"
 import { tempDir } from "./test-helpers.js"
 
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
@@ -397,6 +398,41 @@ while :; do sleep 1; done
       await waitForValue(counter, "2")
     } finally {
       await callDaemon({ type: "stop", project: "demo", workspace: "main", command: "web", environment })
+    }
+  })
+
+  test("workd and its commands run in workd's own systemd scope, and a replacement gets a fresh one", async (t) => {
+    if (!await systemdUserManagerAvailable()) return t.skip("no systemd user manager")
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = { project: "demo", commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'" } } }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "" }
+    const started = await callDaemon({ type: "run", config, workspace: { project: "demo", workspace: "main", branch: "main", root }, command: "web", exposure: { mode: "local" }, environment })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      const first = await daemonStatus()
+      assert.ok(first.pid)
+      if (!first.pid) return
+      const unit = await processUnit(first.pid)
+      assert.ok(unit?.startsWith(workdUnitName(process.env["WORK_STATE_ROOT"], 0).slice(0, -1)), String(unit))
+      assert.equal(sessionScope(unit), false)
+      assert.equal(await processUnit(started.value.data.record.pid), unit)
+
+      // A replaced workd is killed while its scope lives on with the commands it started.
+      process.kill(first.pid, "SIGKILL")
+      while (isPidRunning(first.pid)) await new Promise((resolve) => setTimeout(resolve, 25))
+      const longAgo = new Date(Date.now() - 60_000)
+      await fs.utimes(daemonLockFile(), longAgo, longAgo)
+      const replaced = await ensureDaemon()
+      assert.ok(replaced.ok, JSON.stringify(replaced))
+      if (!replaced.ok) return
+      const replacementUnit = await processUnit(replaced.value)
+      assert.notEqual(replacementUnit, unit)
+      assert.equal(sessionScope(replacementUnit), false)
+      assert.equal(await commandRuntimeStatus(started.value.data.record), "up")
+    } finally {
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
     }
   })
 

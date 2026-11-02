@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url"
 import { appError, debugLog, describe, err, errResult, ok } from "./result.js"
 import { isPidRunning, processCommand } from "./shell.js"
 import { daemonPidFile, daemonSocketFile, stateRoot } from "./state.js"
-import type { Result } from "./result.js"
+import type { AppError, Result } from "./result.js"
+import { daemonLaunchPlan, systemdUserManagerAvailable } from "./systemd.js"
+import type { DaemonLaunch } from "./systemd.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
 
@@ -52,9 +54,32 @@ export async function ensureDaemon(): Promise<Result<number>> {
   if (!ensureDir.ok) return ensureDir
 
   const entrypoint = await daemonEntrypoint()
+  const plan = daemonLaunchPlan(entrypoint, { systemd: await systemdUserManagerAvailable(), stateRoot: stateRoot() })
+  let started = await spawnDaemon(plan)
 
+  // systemd-run fails before it execs workd when it cannot reach the user manager;
+  // a workd that crashes on its own crashes again here and reports its stderr.
+  if (!started.ok && started.exited && plan.unit !== null) {
+    debugLog("daemon", `workd in ${plan.unit} exited during startup, retrying without systemd: ${started.error.message}`)
+    started = await spawnDaemon({ ...entrypoint, unit: null })
+  }
+
+  if (!started.ok) return err(started.error)
+
+  const final = await daemonStatus()
+
+  if (final.pid === null) {
+    return errResult("DaemonError", "workd started but no pid file was written")
+  }
+
+  return ok(final.pid)
+}
+
+type SpawnOutcome = { ok: true } | { ok: false; error: AppError; exited: boolean }
+
+async function spawnDaemon(launch: DaemonLaunch): Promise<SpawnOutcome> {
   let stderrBuffer = ""
-  const child = spawn(entrypoint.command, entrypoint.args, {
+  const child = spawn(launch.command, launch.args, {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
   })
@@ -69,6 +94,10 @@ export async function ensureDaemon(): Promise<Result<number>> {
 
   type ExitInfo = { code: number | null; signal: NodeJS.Signals | null }
   const exitState: { value: ExitInfo | null } = { value: null }
+  child.on("error", (cause) => {
+    stderrBuffer += describe(cause)
+    exitState.value = { code: -1, signal: null }
+  })
   child.on("exit", (code, signal) => {
     exitState.value = { code, signal }
   })
@@ -82,22 +111,14 @@ export async function ensureDaemon(): Promise<Result<number>> {
   child.stderr?.removeAllListeners("data")
   child.stderr?.destroy()
 
-  if (!ready.ok) {
-    if (exitState.value && exitState.value.code !== 0) {
-      const detail = stderrBuffer.trim() || `signal=${exitState.value.signal} code=${exitState.value.code}`
-      return errResult("DaemonError", `workd crashed during startup: ${detail}`)
-    }
+  if (ready.ok) return { ok: true }
 
-    return ready
+  if (exitState.value && exitState.value.code !== 0) {
+    const detail = stderrBuffer.trim() || `signal=${exitState.value.signal} code=${exitState.value.code}`
+    return { ok: false, error: appError("DaemonError", `workd crashed during startup: ${detail}`), exited: true }
   }
 
-  const final = await daemonStatus()
-
-  if (final.pid === null) {
-    return errResult("DaemonError", "workd started but no pid file was written")
-  }
-
-  return ok(final.pid)
+  return { ok: false, error: ready.error, exited: false }
 }
 
 export async function stopDaemon(): Promise<Result<void>> {
