@@ -78,6 +78,7 @@ Command fields:
   env                 extra environment variables
   autoStart           included in work up
   restart             "manual" or "on-exit"
+  ready               { log: "<regex>" } makes work wait match the current run's log
   restartWhenChanged  reserved for file-watch restarts
   route               true to publish a {command}-{workspace}-{project} URL
   routeName           override the first URL segment (default: command id)
@@ -201,7 +202,7 @@ What workd owns:
   stopping commands
   restart command execution
   ps data when running
-  pruning dead records
+  recording exit status of dead commands
   restart: "on-exit"
 
 Restart policy:
@@ -211,6 +212,12 @@ Restart policy:
 maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS limits command lifetime. Expired commands
 stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
 Prune preserves records for supervised commands so their deadlines remain intact.
+
+Dead records:
+  workd marks a dead command with its exit code or signal and exit time instead
+  of dropping it, so work ps shows dead (exit 1, 12:04:31) and work logs still
+  finds the run. The record stays until the command starts again, work stop,
+  work down, or work prune. workd drops it on its own when the worktree is gone.
 
 Update checks:
   work --version   version and commit stamped at build time; -dirty means local changes

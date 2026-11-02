@@ -117,6 +117,7 @@ Behavior:
   work up feature-x --create   Use local branch, else track a unique remote branch, else branch from HEAD.
   work up feature-x --create   Run worktrees.setup after create.
   work up                      Start nothing routed while the portless proxy is down; print how to start it.
+  work up                      Report a command that exits within 1.5s as failed, with its last log lines.
 
 Examples:
   work up
@@ -201,26 +202,30 @@ Examples:
 
   wait: `work wait
 
-Wait until a tracked command's URL answers with HTTP 2xx or 3xx, for up to
-60 seconds unless --timeout says otherwise.
+Wait until a tracked command is ready, for up to 60 seconds unless --timeout
+says otherwise. Routed commands are ready when their URL answers with HTTP 2xx or 3xx.
 Redirects are not followed. Prints the URL once it answers. With --tailscale it
 checks the local URL, since this machine cannot reach its own tailnet URL.
+Commands with ready: { log: "<regex>" } in work.config.js, or --log, are ready
+once a line of the current run's log matches; without a URL this prints that line.
 
 Usage:
-  work wait [-p project] [-w workspace] <id> [--timeout seconds]
-  work wait [workspace] <id> [--timeout seconds]
+  work wait [-p project] [-w workspace] <id> [--timeout seconds] [--log regex]
+  work wait [workspace] <id> [--timeout seconds] [--log regex]
 
 Options:
   -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
   --timeout <seconds>       Give up after this many seconds. Defaults to 60.
+  --log <regex>             Wait for a log line matching regex instead of ready.log.
 
 Exit:
-  1 on timeout or when the command stops before it answers.
+  1 on timeout or when the command stops before it is ready.
 
 Examples:
   work wait web
-  work wait feature-x web --timeout 120`,
+  work wait feature-x web --timeout 120
+  work wait convex --log "functions ready"`,
 
   restart: `work restart
 
@@ -250,6 +255,8 @@ Workspace or command:
 
 Behavior:
   If a routed command needs the portless proxy and it is down, work prints how to start it and restarts nothing.
+  Several commands restart as one batch; work then watches them together for 1.5s
+  and reports any that exit as failed with their last log lines.
 
 Examples:
   work restart web
@@ -279,6 +286,8 @@ Behavior:
   If the command is already alive, work prints "already up".
   If route is enabled, work starts it through portless.
   If route is enabled and the portless proxy is down, work prints how to start it and starts nothing.
+  If the command exits within 1.5s, work reports it as failed with its last log lines.
+  An exit with code 0 in that time prints "exited" and is not a failure.
 
 Examples:
   work run web
@@ -306,7 +315,10 @@ Output:
   status    project/workspace    command    pid    url
 
 Status:
-  commands show up/dead
+  up
+  dead (exit 1, 12:04:31)   exit code or signal and time, once workd notices
+
+Dead commands stay listed until they start again, work down, work stop, or work prune.
 
 Empty state:
   no tracked commands for <project>/<workspace> (work up starts them; work ps -a lists every workspace)`,
@@ -346,25 +358,34 @@ Empty state:
   logs: `work logs
 
 Print or follow captured stdout/stderr for one command.
+Shows the current run: output since the command last started. Each start writes
+a "── work: start <command> <time>" line, and each exit under workd a
+"── work: exit <command> pid=<pid> code=<n>|signal=<name> <time>" line.
+Logs stay readable after the command dies or its record is pruned.
 
 Usage:
-  work logs [-f] [workspace] <command>
-  work logs [-f] [-p project] [-w workspace] <command>
+  work logs [-f] [-n lines] [-a] [workspace] <command>
+  work logs [-f] [-n lines] [-a] [-p project] [-w workspace] <command>
 
 Arguments:
   command      Configured or ad-hoc command id.
 
 Options:
   -f, --follow              Stream logs until interrupted.
+  -n, --tail <lines>        Print only the last lines. --lines is an alias.
+  -a, --all                 Include earlier runs. A log above 10 MB moves to
+                            <log>.1 when the command next starts.
   -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
 Examples:
   work logs web
+  work logs -n 50 web
+  work logs --all web
   work logs claude
   work logs feature-x web
   work logs -w feature-x web
-  work logs -f -w feature-x web`,
+  work logs -f -n 20 -w feature-x web`,
 
   urls: `work urls
 
@@ -443,7 +464,9 @@ Remove dead command records from work state.
 Usage:
   work prune
 
-Use this after crashes, manual kills, or machine restarts.`,
+workd keeps dead records with their exit status so work ps and work logs can
+explain a crash; it drops them on its own only when their worktree is gone.
+Use this to clear them after crashes, manual kills, or machine restarts.`,
 
   daemon: `work daemon
 

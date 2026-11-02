@@ -211,7 +211,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
         const state = await readWorkspaceState(command.config.project, command.workspace.workspace)
         if (!state.ok) return state
         const existing = state.value?.commands[command.command]
-        if (existing && (existing.exposure?.mode ?? "local") !== command.exposure.mode) {
+        if (existing && (existing.exposure?.mode ?? "local") !== command.exposure.mode && await commandRuntimeStatus(existing) === "up") {
           return { ok: false, error: { tag: "ProcessError", message: `command ${command.command} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${command.workspace.workspace} before switching.` } } as const
         }
         const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command, { syncExposures: false, environment: command.environment })
@@ -273,7 +273,7 @@ async function maintain() {
     await reconcile()
     maintenanceTicks++
     if (maintenanceTicks % 5 === 0) {
-      const pruned = await pruneCommands(process.env)
+      const pruned = await pruneCommands(process.env, { keepDead: true })
       if (!pruned.ok) debugLog("workd", `automatic prune failed: ${pruned.error.message}`)
       const recovered = await recoverTailnetProxy(process.env)
       if (!recovered.ok) debugLog("workd", `tailnet proxy recovery failed: ${recovered.error.message}`)
@@ -283,10 +283,11 @@ async function maintain() {
   }
 }
 
-function pruneCommands(environment: NodeJS.ProcessEnv) {
+function pruneCommands(environment: NodeJS.ProcessEnv, options: { keepDead?: boolean } = {}) {
   return pruneDeadCommands(environment, (project, workspace, task) =>
     serialize(workspaceLock(project, workspace), task),
     (project, workspace, id) => desired.has(key(project, workspace, id)),
+    options,
   )
 }
 
@@ -300,7 +301,7 @@ async function expireCommands() {
         return
       }
       for (const [id, record] of Object.entries(state.value?.commands ?? {})) {
-        if (!commandTtlExpired(record)) continue
+        if (record.exitedAt || !commandTtlExpired(record)) continue
 
         desired.delete(key(listed.project, listed.workspace, id))
         const stopped = await stopCommand(listed.project, listed.workspace, id)

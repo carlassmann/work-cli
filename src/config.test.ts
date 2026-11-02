@@ -109,6 +109,27 @@ describe("config", () => {
     if (loaded.ok) assert.equal(loaded.value.commands.web?.route, false)
   })
 
+  test("validates ready.log as a regular expression string", async () => {
+    const root = await tempDir()
+    await writeConfig(root, `export default { project: "tilly", commands: { convex: { run: "bunx convex dev", ready: { log: "Convex functions ready" } } } }`)
+    const loaded = await loadConfig(root)
+    assert.equal(loaded.ok, true)
+    if (loaded.ok) assert.deepEqual(loaded.value.commands.convex?.ready, { log: "Convex functions ready" })
+
+    for (const [value, message] of [
+      ['"ready"', /ready must be an object/],
+      ["{}", /ready\.log must be a non-empty regular expression string/],
+      ["{ log: /ready/ }", /ready\.log must be a non-empty regular expression string/],
+      ['{ log: "(" }', /ready\.log is not a valid regular expression/],
+    ] as const) {
+      const invalidRoot = await tempDir()
+      await writeConfig(invalidRoot, `export default { project: "tilly", commands: { convex: { run: "x", ready: ${value} } } }`)
+      const invalid = await loadConfig(invalidRoot)
+      assert.equal(invalid.ok, false, value)
+      if (!invalid.ok) assert.match(invalid.error.message, message)
+    }
+  })
+
   test("rejects non-string workspace env", async () => {
     const root = await tempDir()
     await writeConfig(root, `export default {

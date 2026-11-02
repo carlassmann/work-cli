@@ -3,8 +3,9 @@ import path from "node:path"
 import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
 import { syncCloudflareTunnel } from "./cloudflare.js"
-import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
-import { listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, startupExits, stopCommand } from "./processes.js"
+import { currentRunOffset } from "./logs.js"
+import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { isPidRunning } from "./shell.js"
 import { tempDir } from "./test-helpers.js"
 import type { DevConfig, WorkspaceRecord, WorkspaceState } from "./types.js"
@@ -499,6 +500,96 @@ while :; do sleep 1; done
     assert.deepEqual((await listWorkspaceStates())[0]?.commands, {})
   })
 
+  test("marks each run in the log and records where the current one starts", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("echo first; exec sleep 30"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+    try {
+      const log = started.value.record.log
+      assert.equal(started.value.record.logOffset, 0)
+      assert.match(await readSoonMatch(log, /first/), /^── work: start web \S+\nfirst\n$/)
+
+      const restarted = await restartTrackedCommand("tilly", "feature-x", "web")
+      assert.ok(restarted.ok)
+      if (!restarted.ok) return
+      const text = await readSoonMatch(log, /first[\s\S]*first/)
+      const offset = restarted.value.record.logOffset ?? -1
+      assert.match(text, new RegExp(`^── work: exit web pid=${started.value.record.pid} signal=SIGTERM `, "m"))
+      assert.match(Buffer.from(text).subarray(offset).toString(), /^── work: start web \S+\nfirst\n$/)
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
+  test("keeps dead records with their exit status until the next start", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("echo ready; exit 3"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+    await readSoonMatch(started.value.record.log, /code=3/)
+
+    const kept = await pruneDeadCommands(process.env, undefined, undefined, { keepDead: true })
+    assert.deepEqual(kept, { ok: true, value: 0 })
+    const state = await readWorkspaceState("tilly", "feature-x")
+    const record = state.ok ? state.value?.commands["web"] : undefined
+    assert.equal(record?.exitCode, 3)
+    assert.ok(record?.exitedAt)
+    assert.equal(await commandRuntimeStatus(record!), "dead")
+    assert.deepEqual(await pruneDeadCommands(process.env, undefined, undefined, { keepDead: true }), { ok: true, value: 0 })
+
+    const restarted = await restartTrackedCommand("tilly", "feature-x", "web")
+    assert.ok(restarted.ok)
+    if (restarted.ok) {
+      assert.equal(restarted.value.record.exitCode, undefined)
+      assert.equal(restarted.value.record.exitedAt, undefined)
+    }
+    await readSoonMatch(started.value.record.log, /code=3[\s\S]*code=3/)
+    assert.deepEqual(await pruneDeadCommands(), { ok: true, value: 1 })
+    assert.deepEqual((await listWorkspaceStates())[0]?.commands, {})
+  })
+
+  test("drops dead records when their worktree is gone", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("exit 1"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+    await readSoonMatch(started.value.record.log, /code=1/)
+    await fs.rm(root, { recursive: true, force: true })
+
+    assert.deepEqual(await pruneDeadCommands(process.env, undefined, undefined, { keepDead: true }), { ok: true, value: 1 })
+    assert.deepEqual((await listWorkspaceStates())[0]?.commands, {})
+  })
+
+  test("starts over a dead record tracked in another mode", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const write = await writeWorkspaceState({
+      ...testWorkspace(root),
+      exposure: { mode: "tailscale", domain: "dev.example.com", certFile: "cert", keyFile: "key", port: 8443 },
+      commands: {
+        web: {
+          id: "web", label: "web", pid: 99999999, command: "gone", run: "gone", route: null, cwd: root,
+          log: path.join(root, "web.log"), url: null, startedAt: new Date().toISOString(),
+          exposure: { mode: "tailscale", domain: "dev.example.com", certFile: "cert", keyFile: "key", port: 8443 },
+          exitedAt: new Date().toISOString(), exitCode: 1,
+        },
+      },
+    } satisfies WorkspaceState)
+    assert.equal(write.ok, true)
+
+    const started = await startCommand(testConfig("exec sleep 30"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (started.ok) {
+      assert.equal(started.value.record.exposure?.mode, "local")
+      assert.equal(started.value.record.exitedAt, undefined)
+    }
+    await stopCommand("tilly", "feature-x", "web")
+  })
+
   test("does not trust a recycled process id", async () => {
     const record = {
       id: "web",
@@ -517,6 +608,92 @@ while :; do sleep 1; done
   })
 })
 
+describe("startup exits", () => {
+  test("reports a command that dies on launch with its exit code and only this run's output", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config = testConfig("echo \"run $WORK_RUN\"; echo 'Proxy is not running' >&2; exit 3")
+    const first = await startCommand({ ...config, env: { WORK_RUN: "1" } }, testWorkspace(root), "web")
+    assert.ok(first.ok)
+    if (!first.ok) return
+    await startupExits([first.value])
+
+    const second = await startCommand({ ...config, env: { WORK_RUN: "2" } }, testWorkspace(root), "web")
+    assert.ok(second.ok)
+    if (!second.ok) return
+    const exits = await startupExits([second.value])
+    assert.deepEqual(exits.get(second.value.record.pid), { code: 3, signal: null, tail: ["run 2", "Proxy is not running"] })
+  })
+
+  test("leaves running commands out and tells a clean exit apart from a failure", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const config: DevConfig = {
+      project: "tilly",
+      commands: {
+        web: { run: "node -e 'setTimeout(() => {}, 30000)'" },
+        codegen: { run: "echo generated" },
+      },
+    }
+    const running = await startCommand(config, testWorkspace(root), "web")
+    const finished = await startCommand(config, testWorkspace(root), "codegen")
+    assert.ok(running.ok && finished.ok)
+    if (!running.ok || !finished.ok) return
+
+    try {
+      const startedAt = Date.now()
+      const exits = await startupExits([running.value, finished.value], 300)
+      assert.ok(Date.now() - startedAt < 1_000)
+      assert.equal(exits.has(running.value.record.pid), false)
+      assert.deepEqual(exits.get(finished.value.record.pid), { code: 0, signal: null, tail: ["generated"] })
+      assert.equal((await startupExits([{ ...running.value, started: false }], 10_000)).size, 0)
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
+  test("reports a clean exit after output without a trailing newline", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("printf done"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+
+    const exits = await startupExits([started.value])
+    assert.deepEqual(exits.get(started.value.record.pid), { code: 0, signal: null, tail: ["done"] })
+    assert.match(await fs.readFile(started.value.record.log, "utf8"), /^done\n── work: exit web pid=\d+ code=0 /m)
+  })
+
+  test("starts the run marker on its own line when the log ends mid-line", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const log = commandLogFile("tilly", "feature-x", "web")
+    await fs.mkdir(path.dirname(log), { recursive: true })
+    await fs.writeFile(log, "── work: start web 2026-11-02T10:00:00.000Z\npartial line from a command that outlived its daemon")
+
+    const started = await startCommand(testConfig("echo second"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+    await startupExits([started.value])
+    const offset = started.value.record.logOffset ?? -1
+    assert.deepEqual(await currentRunOffset(log, offset), { ok: true, value: offset })
+    assert.match((await fs.readFile(log)).subarray(offset).toString(), /^── work: start web \S+\nsecond\n/)
+  })
+
+  test("stops waiting as soon as every fresh start has exited", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("exit 1"), testWorkspace(root), "web")
+    assert.ok(started.ok)
+    if (!started.ok) return
+
+    const startedAt = Date.now()
+    const exits = await startupExits([started.value], 10_000)
+    assert.ok(Date.now() - startedAt < 2_000)
+    assert.deepEqual(exits.get(started.value.record.pid), { code: 1, signal: null, tail: [] })
+  })
+})
+
 async function readSoon(file: string) {
   const deadline = Date.now() + 2_000
 
@@ -526,6 +703,18 @@ async function readSoon(file: string) {
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
+  }
+
+  return await fs.readFile(file, "utf8")
+}
+
+async function readSoonMatch(file: string, pattern: RegExp) {
+  const deadline = Date.now() + 3_000
+
+  while (Date.now() < deadline) {
+    const value = await fs.readFile(file, "utf8").catch(() => "")
+    if (pattern.test(value)) return value
+    await new Promise((resolve) => setTimeout(resolve, 25))
   }
 
   return await fs.readFile(file, "utf8")

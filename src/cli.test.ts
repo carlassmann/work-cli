@@ -427,8 +427,8 @@ describe("cli", () => {
     assert.equal(ps.exitCode, 0)
     assert.equal(ps.stderr, "")
     assert.deepEqual(JSON.parse(ps.stdout), [
-      { project: "tilly", workspace: "main", command: "web", status: "up", pid, url: "https://web-main-tilly.localhost" },
-      { project: "tilly", workspace: "main", command: "worker", status: "up", pid, url: null },
+      { project: "tilly", workspace: "main", command: "web", status: "up", pid, url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: null },
+      { project: "tilly", workspace: "main", command: "worker", status: "up", pid, url: null, exitCode: null, exitSignal: null, exitedAt: null },
     ])
 
     const urls = await runCli(["urls", "--json"], { cwd: root, stateRoot })
@@ -439,6 +439,128 @@ describe("cli", () => {
 
     const empty = await runCli(["urls", "other", "--json"], { cwd: root, stateRoot })
     assert.equal(empty.stdout, "[]\n")
+  })
+
+  test("logs prints the current run by default and falls back to the log file without a record", async () => {
+    const root = await tempDir()
+    const outside = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { web: { run: "x" } } }`)
+    const firstRun = "── work: start web 2026-11-02T10:00:00.000Z\nold ready\n── work: exit web pid=41 code=1 2026-11-02T10:00:05.000Z\n"
+    const currentRun = "── work: start web 2026-11-02T11:00:00.000Z\none\ntwo\nthree\n"
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "logs", "web.log"), firstRun + currentRun)
+
+    const current = await runCli(["logs", "web"], { cwd: root, stateRoot })
+    assert.equal(current.exitCode, 0)
+    assert.equal(current.stdout, currentRun)
+
+    const all = await runCli(["logs", "--all", "web"], { cwd: root, stateRoot })
+    assert.equal(all.stdout, firstRun + currentRun)
+
+    for (const flags of [["-n", "2"], ["--tail", "2"], ["--tail=2"], ["--lines", "2"]]) {
+      const tail = await runCli(["logs", ...flags, "web"], { cwd: root, stateRoot })
+      assert.equal(tail.stdout, "two\nthree\n", flags.join(" "))
+    }
+
+    const allTail = await runCli(["logs", "-a", "-n", "5", "web"], { cwd: root, stateRoot })
+    assert.equal(allTail.stdout, "── work: exit web pid=41 code=1 2026-11-02T10:00:05.000Z\n── work: start web 2026-11-02T11:00:00.000Z\none\ntwo\nthree\n")
+
+    const invalid = await runCli(["logs", "-n", "many", "web"], { cwd: root, stateRoot })
+    assert.equal(invalid.exitCode, 1)
+    assert.ok(invalid.stderr.includes("invalid line count: many"))
+
+    const untracked = await runCli(["logs", "-p", "tilly", "-w", "main", "web"], { cwd: outside, stateRoot })
+    assert.equal(untracked.exitCode, 0)
+    assert.equal(untracked.stdout, currentRun)
+
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "logs", "big.log"), `${"x".repeat(2 * 1024 * 1024)}\n`)
+    const capped = await runCli(["logs", "-n", "1", "big"], { cwd: root, stateRoot })
+    assert.equal(capped.exitCode, 0)
+    assert.equal(capped.stdout.length, 1024 * 1024)
+    assert.ok(capped.stderr.includes("work logs: showing only the last 1 MiB of the requested lines"))
+
+    const missing = await runCli(["logs", "api"], { cwd: root, stateRoot })
+    assert.equal(missing.exitCode, 1)
+    assert.ok(missing.stderr.includes("no log for main/api"))
+  })
+
+  test("ps shows how dead commands exited and urls leaves them out", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const exitedAt = new Date()
+    exitedAt.setUTCHours(12, 4, 31, 0)
+    const env = { TZ: "UTC" }
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "main",
+      branch: "main",
+      root,
+      commands: {
+        web: {
+          id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root,
+          log: path.join(root, "web.log"), url: "https://web-main-tilly.localhost", startedAt: new Date().toISOString(),
+          pid: 99999999, exitedAt: exitedAt.toISOString(), exitCode: 1,
+        },
+      },
+    }))
+
+    const ps = await runCli(["ps"], { cwd: root, stateRoot, env })
+    assert.equal(ps.exitCode, 0)
+    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+
+    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot })
+    assert.deepEqual(JSON.parse(json.stdout), [{
+      project: "tilly", workspace: "main", command: "web", status: "dead", pid: 99999999,
+      url: "https://web-main-tilly.localhost", exitCode: 1, exitSignal: null, exitedAt: exitedAt.toISOString(),
+    }])
+
+    const urls = await runCli(["urls"], { cwd: root, stateRoot })
+    assert.equal(urls.stdout, "no routed commands for tilly/main\n")
+  })
+
+  test("wait matches a log line from the current run", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" })
+    t.after(() => sleeper.kill())
+    const log = path.join(root, "convex.log")
+    const previousRun = "── work: start convex 2026-11-02T10:00:00.000Z\nConvex functions ready\n"
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    await writeFile(log, `${previousRun}── work: start convex 2026-11-02T11:00:00.000Z\nbooting\n`)
+    const record = {
+      id: "convex", label: "convex", command: "convex", run: "convex", route: null, cwd: root, log, url: null,
+      startedAt: new Date().toISOString(), pid: sleeper.pid!, logOffset: Buffer.byteLength(previousRun),
+    }
+    const statePath = path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json")
+    await writeFile(statePath, JSON.stringify({ project: "tilly", workspace: "main", branch: "main", root, commands: { convex: record } }))
+
+    const noCheck = await runCli(["wait", "convex"], { cwd: root, stateRoot })
+    assert.equal(noCheck.exitCode, 1)
+    assert.ok(noCheck.stderr.includes("no URL or ready.log for main/convex"))
+
+    const invalid = await runCli(["wait", "convex", "--log", "("], { cwd: root, stateRoot })
+    assert.equal(invalid.exitCode, 1)
+    assert.ok(invalid.stderr.includes("invalid --log regular expression"))
+
+    await writeFile(statePath, JSON.stringify({ project: "tilly", workspace: "main", branch: "main", root, commands: { convex: { ...record, ready: { log: "functions ready" } } } }))
+    const stale = await runCli(["wait", "convex", "--timeout", "0.5"], { cwd: root, stateRoot })
+    assert.equal(stale.exitCode, 1)
+    assert.ok(stale.stderr.includes("main/convex log did not match /functions ready/ within 0.5s"))
+
+    const waiting = runCli(["wait", "convex", "--timeout", "10"], { cwd: root, stateRoot })
+    setTimeout(() => void fs.appendFile(log, "Convex functions ready! (1.2s)\n"), 500)
+    const ready = await waiting
+    assert.equal(ready.exitCode, 0)
+    assert.equal(ready.stdout, "Convex functions ready! (1.2s)\n")
+
+    const adHoc = await runCli(["wait", "convex", "--log", "^booting$"], { cwd: root, stateRoot })
+    assert.equal(adHoc.exitCode, 0)
+    assert.equal(adHoc.stdout, "booting\n")
   })
 
   test("state commands work outside a configured project", async () => {
@@ -1015,6 +1137,49 @@ describe("cli", () => {
     assert.equal(result.stderr.split("is not running").length, 2)
     const named = new RegExp(`not running on :${closedPort}, and routed commands need it \\((.+)\\)\\.`).exec(result.stderr)?.[1]
     assert.deepEqual(named?.split(", ").sort(), ["tilly/a/web", "tilly/b/web"])
+  })
+
+  test("up reports a command that exits right after starting as failed", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {
+        web: { run: "echo 'listen EADDRINUSE: :3000' >&2; exit 2", autoStart: true },
+        worker: { run: "node -e 'setTimeout(() => {}, 30000)'", autoStart: true },
+        codegen: { run: "printf generated", autoStart: true },
+      },
+    }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "logs", "web.log"), "── work: start web 2026-11-02T10:00:00.000Z\nan earlier run\n")
+
+    try {
+      const result = await runCli(["up"], { cwd: root, stateRoot })
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.stdout, /^failed web pid=\d+ exited with code 2\n {2}listen EADDRINUSE: :3000$/m)
+      assert.ok(!result.stdout.includes("an earlier run"))
+      assert.match(result.stdout, /^started worker pid=\d+$/m)
+      assert.match(result.stdout, /^exited codegen pid=\d+ with code 0$/m)
+      assert.ok(result.stderr.includes("web exited right after starting. Logs: work logs -p tilly -w main web"))
+      assert.ok(!result.stderr.includes("codegen"))
+
+      const again = await runCli(["run", "worker"], { cwd: root, stateRoot })
+      assert.equal(again.exitCode, 0)
+      assert.match(again.stdout, /^already up worker pid=\d+$/m)
+
+      const startedAt = performance.now()
+      const restarted = await runCli(["restart", "web", "worker"], { cwd: root, stateRoot })
+      assert.equal(restarted.exitCode, 1)
+      assert.match(restarted.stdout, /^failed web pid=\d+ exited with code 2$/m)
+      assert.match(restarted.stdout, /^restarted worker pid=\d+$/m)
+      // One 1.5 s watch for the whole batch, not one per command.
+      assert.ok(performance.now() - startedAt < 3_000)
+    } finally {
+      await runCli(["down"], { cwd: root, stateRoot })
+      await runCli(["daemon", "stop"], { cwd: root, stateRoot })
+    }
   })
 
   test("setup --cloudflare exports stable Cloudflare URLs", async () => {

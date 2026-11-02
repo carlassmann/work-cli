@@ -2,17 +2,26 @@ import fs from "node:fs"
 import fsp from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
 import { reserveBackendPort } from "./cloudflare.js"
 import { syncExposures } from "./exposure.js"
 import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
+import { exitMarker, forEachLogChunk, isMarkerLine, parseExitMarker, rotateLargeLog, startMarker, writeMarker } from "./logs.js"
+import type { CommandExit } from "./logs.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { portlessLabel } from "./names.js"
 import { commandProcess, commandRoute, portlessPorts, portlessPortsForConfig, portlessUrl, publicUrl, refreshRouteUrl, routeEnvironment, routeEnvironmentForConfig, routeUrlsForConfig } from "./portless.js"
-import { isPidRunning, isTrackedPidRunning } from "./shell.js"
+import { existsAt, isPidRunning, isTrackedPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
-import type { CommandRecord, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { CommandRecord, DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
+
+const STARTUP_GRACE_MS = 1_500
+const STARTUP_TAIL_LINES = 10
+
+// Exit statuses of commands this process spawned, kept until prune records them.
+const exits = new Map<number, CommandExit>()
 
 export async function startCommand(
   config: DevConfig,
@@ -54,11 +63,10 @@ export async function startCommand(
     return errResult("ProcessError", `workspace ${workspace.workspace} is already running in ${stateMode} mode. Run work down ${workspace.workspace} before switching.`)
   }
 
-  if (existing && (existing.exposure?.mode ?? "local") !== exposure.mode) {
-    return errResult("ProcessError", `command ${id} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${workspace.workspace} before switching.`)
-  }
-
-  if (existing && await commandRuntimeStatus(existing) === "up" && (existing.exposure?.mode ?? "local") === exposure.mode) {
+  if (existing && await commandRuntimeStatus(existing) === "up") {
+    if ((existing.exposure?.mode ?? "local") !== exposure.mode) {
+      return errResult("ProcessError", `command ${id} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${workspace.workspace} before switching.`)
+    }
     return ok({ record: existing, started: false })
   }
 
@@ -80,7 +88,7 @@ export async function startCommand(
   const backendPort = backendPortResult.value
   const commandExec = commandProcess(command.run, route, backendPort)
   if (preserveTtl && existing && commandTtlExpired(existing)) return ok({ record: existing, started: false })
-  const pid = await spawnLogged(id, commandExec, {
+  const spawned = await spawnLogged(id, commandExec, {
     cwd,
     log,
     env: {
@@ -92,14 +100,15 @@ export async function startCommand(
       ...command.env,
     },
   })
-  if (!pid.ok) return pid
+  if (!spawned.ok) return spawned
 
+  const { pid, logOffset } = spawned.value
   const startedAt = new Date().toISOString()
   const maxTtlSeconds = ttl.value
   const record: CommandRecord = {
     id,
     label: command.label ?? id,
-    pid: pid.value,
+    pid,
     command: commandExec.display,
     run: command.run,
     route,
@@ -111,7 +120,9 @@ export async function startCommand(
     ...(backendPort ? { backendPort } : {}),
     ...(command.env ? { env: command.env } : {}),
     ...(command.restart ? { restart: command.restart } : {}),
+    ...(command.ready ? { ready: command.ready } : {}),
     startedAt,
+    logOffset,
     ...(maxTtlSeconds > 0 ? {
       maxTtlSeconds,
       ttlStartedAt: preserveTtl && existing ? existing.ttlStartedAt ?? existing.startedAt : startedAt,
@@ -132,7 +143,7 @@ export async function startCommand(
 
   const write = await writeWorkspaceState(nextState)
   if (!write.ok) {
-    await stopProcessTree(pid.value)
+    await stopProcessTree(pid)
     return write
   }
 
@@ -142,7 +153,7 @@ export async function startCommand(
       delete nextState.commands[id]
       clearEmptyWorkspaceExposure(nextState)
       await writeWorkspaceState(nextState)
-      await stopProcessTree(pid.value)
+      await stopProcessTree(pid)
       await syncExposures(environment.value)
       return synced
     }
@@ -155,14 +166,22 @@ async function spawnLogged(
   id: string,
   commandExec: ReturnType<typeof commandProcess>,
   options: { cwd: string; log: string; env: NodeJS.ProcessEnv },
-): Promise<Result<number>> {
+): Promise<Result<{ pid: number; logOffset: number }>> {
   const mkdir = await tryAsync("IOError", "failed to create log directory", async () =>
     await fsp.mkdir(path.dirname(options.log), { recursive: true }),
   )
   if (!mkdir.ok) return mkdir
+  await rotateLargeLog(options.log)
 
-  const openLog = trySync("IOError", `failed to open log file ${options.log}`, () => fs.openSync(options.log, "a"))
+  const openLog = trySync("IOError", `failed to open log file ${options.log}`, () => fs.openSync(options.log, "a+"))
   if (!openLog.ok) return openLog
+  const marked = trySync("IOError", `failed to write log file ${options.log}`, () =>
+    writeMarker(openLog.value, startMarker(id, new Date().toISOString())),
+  )
+  if (!marked.ok) {
+    fs.closeSync(openLog.value)
+    return marked
+  }
 
   const spawned = await spawnWithLog(commandExec.executable, commandExec.args, {
     cwd: options.cwd,
@@ -173,11 +192,27 @@ async function spawnLogged(
   if (!spawned.ok) return spawned
   spawned.value.unref()
 
-  if (!spawned.value.pid) {
+  const pid = spawned.value.pid
+  if (!pid) {
     return errResult("ProcessError", `spawn produced no pid for ${id}`)
   }
 
-  return ok(spawned.value.pid)
+  exits.delete(pid)
+  spawned.value.once("exit", (code, signal) => {
+    const exit = { code, signal, at: new Date().toISOString() }
+    exits.set(pid, exit)
+    const written = trySync("IOError", `failed to write log file ${options.log}`, () => {
+      const fd = fs.openSync(options.log, "a+")
+      try {
+        writeMarker(fd, exitMarker(id, pid, exit))
+      } finally {
+        fs.closeSync(fd)
+      }
+    })
+    if (!written.ok) debugLog("processes", `exit marker for ${id} failed: ${written.error.message}`)
+  })
+
+  return ok({ pid, logOffset: marked.value })
 }
 
 function freshState(workspace: WorkspaceRecord): WorkspaceState {
@@ -274,7 +309,7 @@ export async function restartTrackedCommand(
 
   const commandExec = commandProcess(command.run, route, command.backendPort)
   if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
-  const pid = await spawnLogged(id, commandExec, {
+  const spawned = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
     log: command.log,
     env: {
@@ -286,17 +321,22 @@ export async function restartTrackedCommand(
       ...command.env,
     },
   })
-  if (!pid.ok) return pid
+  if (!spawned.ok) return spawned
 
+  const pid = spawned.value.pid
   const record: CommandRecord = {
     ...command,
     route,
     url: command.url ? refreshRouteUrl(command.url, port) : command.url,
     ...(command.localUrl ? { localUrl: refreshRouteUrl(command.localUrl, port) } : {}),
-    pid: pid.value,
+    pid,
     command: commandExec.display,
     startedAt: new Date().toISOString(),
+    logOffset: spawned.value.logOffset,
   }
+  delete record.exitedAt
+  delete record.exitCode
+  delete record.exitSignal
   if (ttl.value > 0) {
     record.maxTtlSeconds = ttl.value
     record.ttlStartedAt = preserveTtl ? command.ttlStartedAt ?? command.startedAt : record.startedAt
@@ -309,14 +349,14 @@ export async function restartTrackedCommand(
   if (state.urls) state.urls = urls
   const write = await writeWorkspaceState(state)
   if (!write.ok) {
-    await stopProcessTree(pid.value)
+    await stopProcessTree(pid)
     return write
   }
 
   if (command.exposure && command.exposure.mode !== "local") {
     const synced = await syncExposures(environment.value)
     if (!synced.ok) {
-      await stopProcessTree(pid.value)
+      await stopProcessTree(pid)
       delete state.commands[id]
       clearEmptyWorkspaceExposure(state)
       await writeWorkspaceState(state)
@@ -326,6 +366,65 @@ export async function restartTrackedCommand(
   }
 
   return ok({ record, started: true })
+}
+
+export type StartupExit = { code: number | null; signal: string | null; tail: Array<string> }
+
+// A command that dies on launch (missing proxy, bad config, port taken) is still
+// "started" when spawn returns. Watch fresh starts briefly and report those that already exited.
+export async function startupExits(starts: Array<StartResult>, graceMs = STARTUP_GRACE_MS): Promise<Map<number, StartupExit>> {
+  const deadline = Date.now() + graceMs
+  const pending = new Map(starts.filter((start) => start.started).map((start) => [start.record.pid, start.record]))
+  const exited: Array<CommandRecord> = []
+
+  while (pending.size > 0) {
+    for (const [pid, record] of pending) {
+      if (isPidRunning(pid)) continue
+      pending.delete(pid)
+      exited.push(record)
+    }
+    if (pending.size === 0 || Date.now() >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, deadline - Date.now())))
+  }
+
+  return new Map(await Promise.all(exited.map(async (record) => [record.pid, await startupExit(record)] as const)))
+}
+
+async function startupExit(record: CommandRecord): Promise<StartupExit> {
+  // workd writes the exit marker from its exit handler, which can trail the process by a moment.
+  for (let waited = 0; ; waited += 50) {
+    const run = await startupRun(record)
+    if (run.code !== null || run.signal !== null || waited >= 500) return run
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+async function startupRun(record: CommandRecord): Promise<StartupExit> {
+  const decoder = new StringDecoder("utf8")
+  let pending = ""
+  let tail: Array<string> = []
+  // Assigned inside the callback, which TypeScript's narrowing does not follow.
+  let exit = null as ReturnType<typeof parseExitMarker>
+  const keep = (line: string) => {
+    if (line.trim() && !isMarkerLine(line)) tail = [...tail, line].slice(-STARTUP_TAIL_LINES)
+  }
+
+  await forEachLogChunk(record.log, record.logOffset ?? 0, (chunk) => {
+    const lines = (pending + decoder.write(chunk)).split("\n")
+    pending = lines.pop() ?? ""
+    for (const line of lines) {
+      const marker = parseExitMarker(line)
+      if (marker?.pid === record.pid) {
+        exit = marker
+        return true
+      }
+      keep(line)
+    }
+    return false
+  })
+
+  if (!exit) keep(pending)
+  return { code: exit?.code ?? null, signal: exit?.signal ?? null, tail }
 }
 
 function stateRouteUrls(state: WorkspaceState) {
@@ -344,41 +443,59 @@ export async function pruneDeadCommands(
   environment: NodeJS.ProcessEnv = process.env,
   serializeWorkspace: WorkspaceSerializer = (_project, _workspace, task) => task(),
   isSupervised: (project: string, workspace: string, id: string) => boolean = () => false,
+  { keepDead = false }: { keepDead?: boolean } = {},
 ): Promise<Result<number>> {
   const states = await listWorkspaceStates()
   let pruned = 0
+  let changed = false
 
   for (const listedState of states) {
     const result = await serializeWorkspace(listedState.project, listedState.workspace, async () => {
       const current = await readWorkspaceState(listedState.project, listedState.workspace)
-      if (!current.ok || !current.value) return current.ok ? ok(0) : current
-      let workspacePruned = 0
+      if (!current.ok || !current.value) return current.ok ? ok({ removed: 0, marked: 0 }) : current
+      // Dead records stay for ps and logs until the next start, down, or prune, unless their worktree is gone.
+      const keep = keepDead && await existsAt(current.value.root)
+      let removed = 0
+      let marked = 0
 
       for (const [id, command] of Object.entries(current.value.commands)) {
         if (isSupervised(listedState.project, listedState.workspace, id)) continue
-        if (!await commandIsUp(command)) {
-          const stopped = await stopTrackedProcess(command)
-          if (!stopped.ok) return stopped
+        if (await commandIsUp(command)) continue
+        if (keep && command.exitedAt) continue
+        const exit = exits.get(command.pid)
+        const stopped = await stopTrackedProcess(command)
+        if (!stopped.ok) return stopped
+        if (keep) {
+          markExited(command, exit)
+          marked++
+        } else {
           delete current.value.commands[id]
-          workspacePruned++
+          removed++
         }
       }
 
-      if (workspacePruned === 0) return ok(0)
+      if (removed + marked === 0) return ok({ removed, marked })
       clearEmptyWorkspaceExposure(current.value)
       const write = await writeWorkspaceState(current.value)
-      return write.ok ? ok(workspacePruned) : write
+      return write.ok ? ok({ removed, marked }) : write
     })
     if (!result.ok) return result
-    pruned += result.value
+    pruned += result.value.removed
+    if (result.value.removed + result.value.marked > 0) changed = true
   }
 
-  if (pruned > 0) {
+  if (changed) {
     const synced = await syncExposures(environment)
     if (!synced.ok) return synced
   }
 
   return ok(pruned)
+}
+
+function markExited(command: CommandRecord, exit: CommandExit | undefined) {
+  command.exitedAt = exit?.at ?? new Date().toISOString()
+  if (typeof exit?.code === "number") command.exitCode = exit.code
+  if (exit?.signal) command.exitSignal = exit.signal
 }
 
 function clearEmptyWorkspaceExposure(state: WorkspaceState) {
@@ -388,6 +505,7 @@ function clearEmptyWorkspaceExposure(state: WorkspaceState) {
 }
 
 export async function commandRuntimeStatus(command: CommandRecord): Promise<"up" | "dead"> {
+  if (command.exitedAt) return "dead"
   return await isTrackedPidRunning(command.pid, command.startedAt) ? "up" : "dead"
 }
 
@@ -405,6 +523,7 @@ async function stopTrackedProcess(command: CommandRecord): Promise<Result<void>>
     (!isPidRunning(command.pid) && processGroupIsRunning(command.pid))) {
     await stopProcessTree(command.pid)
   }
+  exits.delete(command.pid)
 
   return ok(undefined)
 }
