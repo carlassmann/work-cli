@@ -71,6 +71,7 @@ bun link
 ```
 
 Optional but recommended: install [`portless`][portless] (for `route: true` commands). Verify with `work doctor`.
+When its proxy is down, `work up`, `run` and `restart` start no routed command and print the exact command that starts it, such as `portless proxy start -p 1355 --https`.
 
 Shell integration (completion + `work cd`) — add to `~/.zshrc` or `~/.bashrc`:
 

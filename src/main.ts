@@ -22,8 +22,9 @@ import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, splitWorkspaceCommands, valueFlag } from "./parse.js"
 import type { WorkspaceCommands } from "./parse.js"
-import { ensurePortless, portlessPortsForConfig, routeEnvironmentForConfig, usesPortless } from "./portless.js"
-import { probePortless } from "./portless-proxy.js"
+import { ensurePortless, portlessEndpoints, portlessPortsForConfig, routeEnvironmentForConfig, usesPortless } from "./portless.js"
+import { ensurePortlessProxy, portlessProxyRemedy, probePortless, proxyRemedyHint } from "./portless-proxy.js"
+import type { RoutedCommand } from "./portless-proxy.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
@@ -33,7 +34,7 @@ import { debugLog, errResult, formatError, ok, tryAsync } from "./result.js"
 import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
 import type { Result } from "./result.js"
 import type { CommandName } from "./commands.js"
-import type { DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
+import type { CommandRecord, DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
 
 type WorkspaceResolution = WorkspaceRecord & {
   created: boolean
@@ -269,7 +270,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
     return ok(undefined)
   }
 
-  return startConfigured(ctx.value, workspace.value, commands, "run", exposure.value)
+  return startConfigured(ctx.value, workspace.value, commands, "run", exposure.value, environment.value)
 }
 
 async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -376,7 +377,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const exposure = await resolveExposure(parsed.value.flags, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
-  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value)
+  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value, environment.value)
 }
 
 const restartUsage = "work restart [workspace] <command>... | work restart -w workspace <command>... | work restart --all"
@@ -413,11 +414,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
     const resolved = await resolveTrackedCommands(target.value, projectArg)
     if (!resolved.ok) return resolved
-    for (const command of resolved.value) {
-      const restarted = await restartTracked(command)
-      if (!restarted.ok) return restarted
-    }
-    return ok(undefined)
+    return restartTrackedTargets(resolved.value)
   }
 
   const target = await projectWorkspaceCommands(ctx.value, positional, parsed.value.flags.workspace, Object.keys(ctx.value.config.commands))
@@ -440,7 +437,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
       return ok(undefined)
     }
 
-    return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value)
+    return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value, environment.value)
   }
 
   if (target.commands.length === 0) {
@@ -456,7 +453,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
     entries.push([command, commandConfig])
   }
 
-  return startConfigured(ctx.value, workspace.value, entries, "restart", exposure.value)
+  return startConfigured(ctx.value, workspace.value, entries, "restart", exposure.value, environment.value)
 }
 
 async function startConfigured(
@@ -464,10 +461,14 @@ async function startConfigured(
   workspace: WorkspaceRecord,
   entries: Array<[string, DevConfig["commands"][string]]>,
   type: "run" | "restart",
-  exposure: Exposure = { mode: "local" },
+  exposure: Exposure,
+  environment: NodeJS.ProcessEnv,
 ): Promise<Result<void>> {
   const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
+  const routed = entries.filter(([, command]) => usesPortless(command))
+  const proxy = await ensurePortlessProxy(await portlessEndpoints({ ...ctx.config.env, ...environment }, Object.fromEntries(routed.map(([id, command]) => [id, command.env]))))
+  if (!proxy.ok) return proxy
   for (const [id] of entries) {
     const response = await callDaemon({
       type,
@@ -494,12 +495,48 @@ async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Resu
     return ok(undefined)
   }
 
+  return restartTrackedTargets(targets)
+}
+
+type TrackedTarget = { project: string; workspace: string; command: string }
+
+// Checks the proxy for the whole batch before restarting anything, so a stopped proxy
+// leaves every command as it was.
+async function restartTrackedTargets(targets: Array<TrackedTarget>): Promise<Result<void>> {
+  const proxy = await ensureTrackedPortlessProxy(targets)
+  if (!proxy.ok) return proxy
+
   for (const target of targets) {
     const result = await restartTracked(target)
     if (!result.ok) return result
   }
 
   return ok(undefined)
+}
+
+async function ensureTrackedPortlessProxy(targets: Array<TrackedTarget>): Promise<Result<void>> {
+  const workspaces = new Map<string, Array<TrackedTarget>>()
+  for (const target of targets) {
+    const key = `${target.project}/${target.workspace}`
+    workspaces.set(key, [...workspaces.get(key) ?? [], target])
+  }
+
+  const routed: Array<RoutedCommand> = []
+  for (const group of workspaces.values()) {
+    const { project, workspace } = group[0]!
+    const state = await readWorkspaceState(project, workspace)
+    if (!state.ok) return state
+    const current = state.value
+    if (!current) continue
+    const records = group.map((target) => current.commands[target.command]).filter((record): record is CommandRecord => Boolean(record?.route))
+    if (records.length === 0) continue
+    const environment = await loadWorkspaceEnvironment(current.sourceRoot ?? current.root, current.root)
+    if (!environment.ok) return environment
+    const endpoints = await portlessEndpoints({ ...current.env, ...environment.value }, Object.fromEntries(records.map((record) => [record.id, record.env])))
+    routed.push(...endpoints.map((endpoint) => ({ ...endpoint, id: `${project}/${workspace}/${endpoint.id}` })))
+  }
+
+  return ensurePortlessProxy(routed)
 }
 
 async function restartTracked(target: { project: string; workspace: string; command: string }): Promise<Result<void>> {
@@ -1021,7 +1058,7 @@ async function portlessDoctorLine(needed: boolean, environment: NodeJS.ProcessEn
   if (!await commandExists("portless", environment)) return "portless\tmissing"
   const proxy = await probePortless(environment)
   if (proxy.state === "ok") return `portless\tok\tproxy on :${proxy.port}`
-  if (proxy.state === "stopped") return `portless\tstopped\tno proxy on :${proxy.port}; start it with portless proxy start`
+  if (proxy.state === "stopped") return `portless\tstopped\tno proxy on :${proxy.port}; ${proxyRemedyHint(await portlessProxyRemedy(environment, proxy.port))}`
   return `portless\tblocked\t:${proxy.port} answers without X-Portless; another proxy owns the port`
 }
 

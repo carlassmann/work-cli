@@ -2,7 +2,7 @@ import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { commandProcess, commandRoute, portlessPortsForConfig, refreshRouteUrl, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
+import { commandProcess, commandRoute, portlessEndpoints, portlessPortsForConfig, refreshRouteUrl, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
 import { tempDir } from "./test-helpers.js"
 import type { DevConfig } from "./types.js"
 
@@ -115,6 +115,17 @@ describe("portless", () => {
     }, { PORTLESS_PORT: "9" })
 
     assert.deepEqual(ports, { web: 1355, api: 8443 })
+  })
+
+  test("hands the proxy check the same ports URLs use, with each command's effective env", async () => {
+    const dir = await tempDir("portless-state-")
+    await fs.writeFile(path.join(dir, "proxy.port"), "8443\n")
+    const endpoints = await portlessEndpoints({ PORTLESS_STATE_DIR: dir, HOME: "/home/me" }, { web: undefined, api: { PORTLESS_STATE_DIR: dir, PORTLESS_PORT: "9" } })
+
+    assert.deepEqual(endpoints, [
+      { id: "web", port: 8443, environment: { PORTLESS_STATE_DIR: dir, HOME: "/home/me" } },
+      { id: "api", port: 8443, environment: { PORTLESS_STATE_DIR: dir, HOME: "/home/me", PORTLESS_PORT: "9" } },
+    ])
   })
 
   test("refreshes recorded localhost URLs and leaves external ones alone", () => {

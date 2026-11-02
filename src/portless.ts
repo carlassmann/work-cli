@@ -3,6 +3,7 @@ import { cloudflareHostname } from "./cloudflare.js"
 import { tailscaleHostname } from "./tailscale.js"
 import { portlessLabel, routeName, routeUrl } from "./names.js"
 import { portlessPort } from "./portless-proxy.js"
+import type { RoutedCommand } from "./portless-proxy.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
 import type { CommandConfig, DevConfig, Exposure } from "./types.js"
@@ -62,17 +63,22 @@ export function routeEnvironmentForConfig(config: DevConfig, workspace: string, 
 }
 
 // Each routed command runs portless with its own env on top of the workspace env, and a
-// PORTLESS_* override there can point it at another proxy.
-export async function portlessPorts(environment: NodeJS.ProcessEnv, commandEnvironments: Record<string, Record<string, string> | undefined>) {
+// PORTLESS_* override there can point it at another proxy. URLs and the proxy check both
+// resolve endpoints here, so they always agree on the port.
+export async function portlessEndpoints(environment: NodeJS.ProcessEnv, commandEnvironments: Record<string, Record<string, string> | undefined>) {
   const lookups = new Map<string, Promise<number>>()
-  const ports: Record<string, number> = {}
+  const endpoints: Array<RoutedCommand> = []
   for (const [id, commandEnvironment] of Object.entries(commandEnvironments)) {
     const effective = { ...environment, ...commandEnvironment }
     const key = ["PORTLESS_STATE_DIR", "PORTLESS_PORT", "HOME"].map((name) => effective[name] ?? "").join("\0")
     if (!lookups.has(key)) lookups.set(key, portlessPort(effective))
-    ports[id] = await lookups.get(key)!
+    endpoints.push({ id, port: await lookups.get(key)!, environment: effective })
   }
-  return ports
+  return endpoints
+}
+
+export async function portlessPorts(environment: NodeJS.ProcessEnv, commandEnvironments: Record<string, Record<string, string> | undefined>) {
+  return Object.fromEntries((await portlessEndpoints(environment, commandEnvironments)).map((endpoint) => [endpoint.id, endpoint.port]))
 }
 
 export function portlessPortsForConfig(config: DevConfig, environment: NodeJS.ProcessEnv) {

@@ -1,5 +1,7 @@
 import fs from "node:fs/promises"
 import { spawn } from "node:child_process"
+import http from "node:http"
+import net from "node:net"
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
@@ -910,6 +912,111 @@ describe("cli", () => {
     assert.equal(await readFileSoon(output), "ready")
   })
 
+  test("up refuses routed commands while the Portless proxy is stopped", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const bin = await fakePortlessBin()
+    const port = await freePort()
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: { web: { run: "node -e 'setTimeout(() => {}, 30000)'", route: true, autoStart: true } },
+    }`)
+
+    const result = await runCli(["up"], {
+      cwd: root,
+      stateRoot,
+      env: { PATH: `${bin}:${process.env["PATH"]}`, PORTLESS_PORT: String(port), PORTLESS_STATE_DIR: await tempDir("portless-state-") },
+    })
+
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.stdout, "")
+    assert.ok(result.stderr.includes(`the Portless proxy is not running on :${port}, and routed commands need it (web).`))
+    assert.ok(result.stderr.includes(`  portless proxy start -p ${port} --https`))
+    await assert.rejects(fs.access(path.join(stateRoot, "projects")))
+  })
+
+  test("run and tracked restart check the proxy each command's own env points at", async () => {
+    const root = await tempDir()
+    const elsewhere = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const bin = await fakePortlessBin()
+    const portless = http.createServer((_request, response) => response.writeHead(404, { "x-portless": "1" }).end())
+    await new Promise<void>((resolve) => portless.listen(0, "127.0.0.1", resolve))
+    const livePort = (portless.address() as net.AddressInfo).port
+    const closedPort = await freePort()
+    const portlessState = await tempDir("portless-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {
+        web: { run: "node -e 'setTimeout(() => {}, 30000)'", route: true, env: { PORTLESS_PORT: "${livePort}" } },
+        api: { run: "node -e 'setTimeout(() => {}, 30000)'", route: true, env: { PORTLESS_PORT: "${closedPort}" } },
+      },
+    }`)
+    const env = { PATH: `${bin}:${process.env["PATH"]}`, PORTLESS_PORT: String(closedPort), PORTLESS_STATE_DIR: portlessState }
+
+    try {
+      const run = await runCli(["run", "web"], { cwd: root, stateRoot, env })
+      assert.equal(run.stderr, "")
+      assert.equal(run.exitCode, 0)
+
+      const restart = await runCli(["restart", "-p", "tilly", "web"], { cwd: elsewhere, stateRoot, env: { ...env, PORTLESS_PORT: String(await freePort()) } })
+      assert.equal(restart.stderr, "")
+      assert.equal(restart.exitCode, 0)
+
+      const api = await runCli(["run", "api"], { cwd: root, stateRoot, env: { ...env, PORTLESS_PORT: String(livePort) } })
+      assert.equal(api.exitCode, 1)
+      assert.ok(api.stderr.includes(`the Portless proxy is not running on :${closedPort}, and routed commands need it (api).`))
+    } finally {
+      portless.close()
+      await runCli(["down"], { cwd: root, stateRoot, env })
+      await runCli(["daemon", "stop"], { cwd: root, stateRoot, env })
+    }
+  })
+
+  test("restart --all checks a proxy shared by several workspaces once", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const closedPort = await freePort()
+    for (const workspace of ["a", "b"]) {
+      await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", workspace, "state.json"), JSON.stringify({
+        project: "tilly",
+        workspace,
+        branch: workspace,
+        root,
+        commands: {
+          web: {
+            id: "web",
+            label: "web",
+            command: "web",
+            run: "true",
+            route: `web-${workspace}-tilly`,
+            cwd: root,
+            log: path.join(root, `${workspace}.log`),
+            url: null,
+            startedAt: new Date().toISOString(),
+            pid: 999_999,
+          },
+        },
+      }))
+    }
+
+    const result = await runCli(["restart", "--all", "-p", "tilly"], {
+      cwd: root,
+      stateRoot,
+      env: { PATH: `${await fakePortlessBin()}:${process.env["PATH"]}`, PORTLESS_PORT: String(closedPort), PORTLESS_STATE_DIR: await tempDir("portless-state-") },
+    })
+
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.stdout, "")
+    assert.equal(result.stderr.split("is not running").length, 2)
+    const named = new RegExp(`not running on :${closedPort}, and routed commands need it \\((.+)\\)\\.`).exec(result.stderr)?.[1]
+    assert.deepEqual(named?.split(", ").sort(), ["tilly/a/web", "tilly/b/web"])
+  })
+
   test("setup --cloudflare exports stable Cloudflare URLs", async () => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
@@ -1021,4 +1128,23 @@ async function writeTrackedState(stateRoot: string, root: string, project: strin
       log: path.join(root, `${id}.log`), url: null, startedAt: new Date().toISOString(), pid,
     }])),
   }))
+}
+
+async function fakePortlessBin() {
+  const bin = await tempDir("work-cli-bin-")
+  await writeFile(path.join(bin, "portless"), `#!/bin/sh
+[ "$1" = "service" ] && exit 0
+while [ "$#" -gt 0 ] && [ "$1" != "sh" ]; do shift; done
+exec "$@"
+`)
+  await fs.chmod(path.join(bin, "portless"), 0o755)
+  return bin
+}
+
+async function freePort() {
+  const server = net.createServer()
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const { port } = server.address() as net.AddressInfo
+  await new Promise((resolve) => server.close(resolve))
+  return port
 }
