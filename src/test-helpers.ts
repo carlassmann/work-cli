@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -6,6 +7,19 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 const repoRoot = path.resolve()
+const cliStateRoots = new Set<string>()
+
+// runCli auto-starts a workd per state root and the tests never stop it.
+// Stop them when the test process exits so test runs don't leave daemons behind.
+process.on("exit", () => {
+  for (const stateRoot of cliStateRoots) {
+    try {
+      process.kill(Number.parseInt(readFileSync(path.join(stateRoot, "workd.pid"), "utf8"), 10))
+    } catch {
+      // no workd started for this state root, or it already exited
+    }
+  }
+})
 
 export async function tempDir(prefix = "work-cli-test-") {
   return await fs.mkdtemp(path.join(os.tmpdir(), prefix))
@@ -35,10 +49,11 @@ export async function runCli(args: Array<string>, options: { cwd: string; stateR
     ...process.env,
     WORK_STATE_ROOT: options.stateRoot ?? await tempDir("work-cli-state-"),
     XDG_CONFIG_HOME: await tempDir("work-cli-config-"),
-    // These tests do not stop the workd they start; keep it out of a systemd scope that would outlive them.
+    // Keep workd out of a systemd scope so it can't outlive the test process.
     WORK_DAEMON_SYSTEMD: "0",
     ...options.env,
   }
+  cliStateRoots.add(env.WORK_STATE_ROOT)
 
   try {
     const result = await execFileAsync("bun", [path.join(repoRoot, "src/main.ts"), ...args], {
