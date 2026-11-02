@@ -159,7 +159,7 @@ Commands using git:
   work up feature-x         creates ../project.worktrees/feature-x when needed
   work create x --remote origin   fetches and tracks a remote branch
   work setup feature-x      resolves an existing worktree
-  work run/restart/logs     use current branch when workspace is omitted
+  work run/restart/logs/ps  use current branch when workspace is omitted
 
 State-only commands:
   ps/status/prune/daemon/docs/completions/shell-init/doctor do not need config
@@ -419,23 +419,27 @@ callback path.`,
   work down --all
     stop tracked commands for a workspace, current project, or all projects
 
-  work stop [workspace] <id>
-  work stop [-p project] [-w workspace] <id>
-    stop a tracked command
+  work stop [workspace] <id>...
+  work stop [-p project] [-w workspace] <id>...
+    stop tracked commands
 
-  work restart [workspace] <command>
-  work restart [-p project] [-w workspace] <command>
-    stop and start one configured command
+  work restart [workspace] <command>...
+  work restart [-p project] [-w workspace] <command>...
+    stop and start configured commands
 
   work restart [-p project] [-w workspace] --all
     stop and start autoStart commands, or tracked commands outside a project
+
+  work wait [workspace] <id> [--timeout seconds]
+  work wait [-p project] [-w workspace] <id> [--timeout seconds]
+    wait until a routed command's URL answers; gives up after 60 seconds by default
 
   work run [workspace] <command>
   work run [-w workspace] <command>
     start one configured command, idempotently
 
-  work ps [-a|--all]
-    list tracked commands for the current workspace, or all tracked state outside a project
+  work ps [workspace] [-w workspace] [-a|--all]
+    list tracked commands for a workspace (default: current), or all tracked state outside a project
 
   work status
     alias for work ps

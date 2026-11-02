@@ -20,7 +20,8 @@ import { waitForUrl } from "./readiness.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state.js"
 import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
-import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
+import { booleanFlag, parseArgs, splitWorkspaceCommands, valueFlag } from "./parse.js"
+import type { WorkspaceCommands } from "./parse.js"
 import { ensurePortless, portlessPortsForConfig, routeEnvironmentForConfig, usesPortless } from "./portless.js"
 import { probePortless } from "./portless-proxy.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
@@ -367,7 +368,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
     return errResult("CLIError", withSuggestion(`unknown command: ${command}`, command, Object.keys(ctx.value.config.commands)))
   }
 
-  const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true })
+  const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true, usage: "work run [-w workspace] <command>" })
   if (!workspace.ok) return workspace
 
   const environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
@@ -378,6 +379,8 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value)
 }
 
+const restartUsage = "work restart [workspace] <command>... | work restart -w workspace <command>... | work restart --all"
+
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
     flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w"), cloudflare: booleanFlag(), tailscale: booleanFlag() },
@@ -386,36 +389,43 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const all = parsed.value.flags.all
   const projectArg = parsed.value.flags.project
-  const positional = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
-  if (!positional.ok) return positional
-  const workspaceArg = positional.value.workspace
-  const target = positional.value.command
-
-  if (all && target) {
-    return errResult("CLIError", "work restart --all accepts no command argument")
-  }
-
+  const positional = parsed.value.positional
   const ctx = await loadProjectContext()
   if (!ctx.ok || projectArg) {
     if (parsed.value.flags.tailscale) {
       return errResult("CLIError", "--tailscale needs the project config; tracked restarts keep their routing mode")
     }
+
+    const target = await trackedWorkspaceCommands(positional, parsed.value.flags)
+    if (!target.ok) return target
     if (all) {
-      const states = await findWorkspaceStates({ project: projectArg, workspace: workspaceArg })
+      if (target.value.commands.length > 0) {
+        return errResult("CLIError", "work restart --all accepts no command argument")
+      }
+      const states = await findWorkspaceStates({ project: projectArg, workspace: target.value.workspace })
       if (!states.ok) return states
       return restartTrackedStates(states.value)
     }
 
-    if (!target) {
-      return errResult("CLIError", "missing command. Usage: work restart [workspace] <command> | work restart -w workspace <command> | work restart --all")
+    if (target.value.commands.length === 0) {
+      return errResult("CLIError", `missing command. Usage: ${restartUsage}`)
     }
 
-    const resolved = await resolveTrackedCommand(target, { project: projectArg, workspace: workspaceArg })
+    const resolved = await resolveTrackedCommands(target.value, projectArg)
     if (!resolved.ok) return resolved
-    return restartTracked(resolved.value)
+    for (const command of resolved.value) {
+      const restarted = await restartTracked(command)
+      if (!restarted.ok) return restarted
+    }
+    return ok(undefined)
   }
 
-  const workspace = await resolveWorkspace(ctx.value, workspaceArg, { create: false, noCreate: true })
+  const target = await projectWorkspaceCommands(ctx.value, positional, parsed.value.flags.workspace, Object.keys(ctx.value.config.commands))
+  if (all && target.commands.length > 0) {
+    return errResult("CLIError", "work restart --all accepts no command argument")
+  }
+
+  const workspace = await resolveWorkspace(ctx.value, target.workspace, { create: false, noCreate: true, usage: "work restart [-w workspace] <command>..." })
   if (!workspace.ok) return workspace
   const environment = await loadWorkspaceEnvironment(ctx.value.root, workspace.value.root)
   if (!environment.ok) return environment
@@ -433,17 +443,20 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
     return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value)
   }
 
-  if (!target) {
-    return errResult("CLIError", "missing command. Usage: work restart [workspace] <command> | work restart -w workspace <command> | work restart --all")
+  if (target.commands.length === 0) {
+    return errResult("CLIError", `missing command. Usage: ${restartUsage}`)
   }
 
-  const commandConfig = ctx.value.config.commands[target]
-
-  if (!commandConfig) {
-    return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, target, Object.keys(ctx.value.config.commands)))
+  const entries: Array<[string, DevConfig["commands"][string]]> = []
+  for (const command of target.commands) {
+    const commandConfig = ctx.value.config.commands[command]
+    if (!commandConfig) {
+      return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, command, Object.keys(ctx.value.config.commands)))
+    }
+    entries.push([command, commandConfig])
   }
 
-  return startConfigured(ctx.value, workspace.value, [[target, commandConfig]], "restart", exposure.value)
+  return startConfigured(ctx.value, workspace.value, entries, "restart", exposure.value)
 }
 
 async function startConfigured(
@@ -502,13 +515,17 @@ async function restartTracked(target: { project: string; workspace: string; comm
 }
 
 async function runPs(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { all: booleanFlag("a"), json: booleanFlag() } })
+  const parsed = parseArgs(args, { flags: { all: booleanFlag("a"), workspace: valueFlag("w"), json: booleanFlag() } })
   if (!parsed.ok) return parsed
-  if (parsed.value.positional.length > 0) {
-    return errResult("CLIError", `unexpected argument: ${parsed.value.positional[0]}`)
+
+  const workspace = parsed.value.flags.workspace ?? parsed.value.positional[0]
+  const extra = unexpectedPositional(parsed.value.positional, parsed.value.flags.workspace ? 0 : 1)
+  if (extra) return extra
+  if (parsed.value.flags.all && workspace) {
+    return errResult("CLIError", "work ps --all accepts no workspace argument")
   }
 
-  const table = await trackedCommandTable(parsed.value.flags.all, parsed.value.flags.json)
+  const table = await trackedCommandTable(parsed.value.flags.all, parsed.value.flags.json, workspace)
   if (!table.ok) return table
 
   console.log(table.value)
@@ -554,12 +571,12 @@ async function runWatch(args: ReadonlyArray<string>): Promise<Result<void>> {
   return ok(undefined)
 }
 
-async function trackedCommandTable(all: boolean, json = false): Promise<Result<string>> {
-  const statesResult = all ? ok(await listWorkspaceStates()) : await currentWorkspaceStates()
-  if (!statesResult.ok) return statesResult
+async function trackedCommandTable(all: boolean, json = false, workspace?: string): Promise<Result<string>> {
+  const scope = all ? ok({ states: await listWorkspaceStates(), empty: "no tracked commands" }) : await workspaceScope(workspace)
+  if (!scope.ok) return scope
 
   const records = []
-  for (const state of statesResult.value) {
+  for (const state of scope.value.states) {
     for (const command of Object.values(state.commands)) {
       records.push({
         project: state.project,
@@ -574,7 +591,7 @@ async function trackedCommandTable(all: boolean, json = false): Promise<Result<s
 
   if (json) return ok(JSON.stringify(records))
   if (records.length === 0) {
-    return ok("no tracked commands")
+    return ok(scope.value.empty)
   }
 
   const rows = records.map((record) => [record.status, `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
@@ -596,15 +613,25 @@ function interruptibleSleep(ms: number, stopped: () => boolean): Promise<void> {
   })
 }
 
-async function currentWorkspaceStates(): Promise<Result<Array<WorkspaceState>>> {
+async function workspaceScope(workspaceArg: string | undefined): Promise<Result<{ states: Array<WorkspaceState>; empty: string }>> {
   const ctx = await loadProjectContext()
-  if (!ctx.ok) return ok(await listWorkspaceStates())
+  if (!ctx.ok) {
+    const states = await findWorkspaceStates({ workspace: workspaceArg })
+    if (!states.ok) return states
+    const empty = workspaceArg ? `no tracked commands for workspace ${slugify(workspaceArg)} (work ps -a lists every workspace)` : "no tracked commands"
+    return ok({ states: states.value, empty })
+  }
 
-  const workspace = await defaultWorkspace(ctx.value.cwdRoot)
-  const state = await readWorkspaceState(ctx.value.config.project, workspace)
+  const project = ctx.value.config.project
+  const workspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
+  const state = await readWorkspaceState(project, workspace)
   if (!state.ok) return state
 
-  return ok(state.value ? [state.value] : [])
+  const up = workspaceArg ? `work up ${workspace}` : "work up"
+  return ok({
+    states: state.value ? [state.value] : [],
+    empty: `no tracked commands for ${project}/${workspace} (${up} starts them; work ps -a lists every workspace)`,
+  })
 }
 
 function formatTable(rows: Array<Array<string>>): string {
@@ -719,7 +746,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (rows.length === 0) {
-    console.log(`no routed commands for ${workspace}`)
+    console.log(`no routed commands for ${ctx.value.config.project}/${workspace}`)
   } else {
     console.log(formatTable([["workspace", "command", "url"], ...rows]))
   }
@@ -736,18 +763,45 @@ function urlsJson(states: Array<WorkspaceState>): string {
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, { flags: { project: valueFlag("p"), workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
-  const wsCmd = await resolveWorkspaceAndCommand(parsed.value.positional, parsed.value.flags, "stop")
-  if (!wsCmd.ok) return wsCmd
-
-  const response = await callDaemon({ type: "stop", project: wsCmd.value.project, workspace: wsCmd.value.workspace, command: wsCmd.value.command, environment: childEnvironment() })
-  if (!response.ok) return response
-
-  if (!response.value.data) {
-    return errResult("CLIError", withSuggestion(`no tracked command: ${wsCmd.value.workspace}/${wsCmd.value.command}`, wsCmd.value.command, await commandCandidates(wsCmd.value.project, wsCmd.value.workspace)))
+  if (parsed.value.positional.length === 0) {
+    return errResult("CLIError", "missing command. Usage: work stop [workspace] <id>... | work stop -w workspace <id>...")
   }
 
-  console.log(`stopped ${wsCmd.value.project}/${wsCmd.value.workspace}/${wsCmd.value.command}`)
-  return ok(undefined)
+  const targets = await stopTargets(parsed.value.positional, parsed.value.flags)
+  if (!targets.ok) return targets
+
+  const missing = []
+  for (const target of targets.value) {
+    const response = await callDaemon({ type: "stop", ...target, environment: childEnvironment() })
+    if (!response.ok) return response
+
+    if (response.value.data) {
+      console.log(`stopped ${target.project}/${target.workspace}/${target.command}`)
+    } else {
+      missing.push(withSuggestion(`no tracked command: ${target.workspace}/${target.command}`, target.command, await commandCandidates(target.project, target.workspace)))
+    }
+  }
+
+  return missing.length > 0 ? errResult("CLIError", missing.join("\n")) : ok(undefined)
+}
+
+async function stopTargets(
+  positional: ReadonlyArray<string>,
+  flags: { project: string | undefined; workspace: string | undefined },
+): Promise<Result<Array<{ project: string; workspace: string; command: string }>>> {
+  const ctx = await loadProjectContext()
+  if (!ctx.ok || flags.project) {
+    const target = await trackedWorkspaceCommands(positional, flags)
+    if (!target.ok) return target
+    return resolveTrackedCommands(target.value, flags.project)
+  }
+
+  const project = ctx.value.config.project
+  const current = await defaultWorkspace(ctx.value.cwdRoot)
+  const commandIds = await commandCandidates(project, current, Object.keys(ctx.value.config.commands))
+  const target = await projectWorkspaceCommands(ctx.value, positional, flags.workspace, commandIds)
+  const workspace = target.workspace ? slugify(target.workspace) : current
+  return ok(target.commands.map((command) => ({ project, workspace, command })))
 }
 
 async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -1058,7 +1112,7 @@ async function runComplete(args: ReadonlyArray<string>): Promise<Result<void>> {
 async function resolveWorkspaceAndCommand(
   positional: ReadonlyArray<string>,
   flags: { project: string | undefined; workspace: string | undefined },
-  commandName: "stop" | "wait",
+  commandName: "wait",
 ): Promise<Result<{ project: string; workspace: string; command: string }>> {
   const target = workspaceCommandArgs(positional, flags.workspace)
   if (!target.ok) return target
@@ -1098,6 +1152,44 @@ function workspaceCommandArgs(positional: ReadonlyArray<string>, workspaceFlag: 
   }
 
   return ok({ workspace: workspaceFlag, command: positional[0] })
+}
+
+async function projectWorkspaceCommands(
+  ctx: ProjectContext,
+  positional: ReadonlyArray<string>,
+  workspaceFlag: string | undefined,
+  commandIds: Array<string>,
+): Promise<WorkspaceCommands> {
+  const first = positional[0]
+  const firstIsCommandOnly = first !== undefined && commandIds.includes(first) && !await workspaceExists(ctx, first)
+  return splitWorkspaceCommands(positional, workspaceFlag, firstIsCommandOnly)
+}
+
+async function trackedWorkspaceCommands(
+  positional: ReadonlyArray<string>,
+  flags: { project: string | undefined; workspace: string | undefined },
+): Promise<Result<WorkspaceCommands>> {
+  const states = await findWorkspaceStates({ project: flags.project })
+  if (!states.ok) return states
+
+  const first = positional[0]
+  const firstIsCommandOnly = first !== undefined
+    && states.value.some((state) => state.commands[first])
+    && !states.value.some((state) => state.workspace === slugify(first))
+  return ok(splitWorkspaceCommands(positional, flags.workspace, firstIsCommandOnly))
+}
+
+async function resolveTrackedCommands(
+  target: WorkspaceCommands,
+  project: string | undefined,
+): Promise<Result<Array<{ project: string; workspace: string; command: string }>>> {
+  const resolved = []
+  for (const command of target.commands) {
+    const match = await resolveTrackedCommand(command, { project, workspace: target.workspace })
+    if (!match.ok) return match
+    resolved.push(match.value)
+  }
+  return ok(resolved)
 }
 
 async function resolveTrackedCommand(
@@ -1157,6 +1249,16 @@ async function loadProjectContext(): Promise<Result<ProjectContext>> {
 async function defaultWorkspace(root: string): Promise<string> {
   const workspace = await workspaceFromGit(root)
   return workspace.ok ? workspace.value : path.basename(root)
+}
+
+function worktreePath(ctx: ProjectContext, workspace: string) {
+  return path.resolve(ctx.root, ctx.config.worktrees?.dir ?? `../${ctx.config.project}.worktrees`, workspace)
+}
+
+async function workspaceExists(ctx: ProjectContext, name: string) {
+  const workspace = slugify(name)
+  const current = await workspaceFromGit(ctx.cwdRoot)
+  return (current.ok && current.value === workspace) || await existsAt(worktreePath(ctx, workspace))
 }
 
 async function followLog(file: string): Promise<Result<void>> {
@@ -1323,7 +1425,7 @@ function levenshtein(a: string, b: string) {
 async function resolveWorkspace(
   ctx: ProjectContext,
   name: string | undefined,
-  flags: { create: boolean; noCreate: boolean; remote?: string | undefined },
+  flags: { create: boolean; noCreate: boolean; remote?: string | undefined; usage?: string },
 ): Promise<Result<WorkspaceResolution>> {
   const { config, root, cwdRoot } = ctx
   const currentResult = await workspaceFromGit(cwdRoot)
@@ -1346,12 +1448,12 @@ async function resolveWorkspace(
     })
   }
 
-  const worktreeRoot = path.resolve(root, config.worktrees?.dir ?? `../${config.project}.worktrees`, workspace)
+  const worktreeRoot = worktreePath(ctx, workspace)
   const exists = await existsAt(worktreeRoot)
 
   if (!exists) {
     if (flags.noCreate) {
-      return errResult("WorkspaceError", `workspace ${workspace} does not exist`)
+      return errResult("WorkspaceError", missingWorkspaceMessage(config, workspace, flags.usage))
     }
 
     const source = await resolveBranchSource(root, name, workspace, flags.remote)
@@ -1386,6 +1488,11 @@ async function resolveWorkspace(
     sourceRoot: root,
     created: false,
   })
+}
+
+function missingWorkspaceMessage(config: DevConfig, workspace: string, usage: string | undefined) {
+  const message = `workspace ${workspace} does not exist`
+  return usage && config.commands[workspace] ? `${message}; ${workspace} is a command id. Usage: ${usage}` : message
 }
 
 async function confirm(question: string) {

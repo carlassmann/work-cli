@@ -298,6 +298,7 @@ Day in the life:
 work up chat-streaming --create
 
 # Wait until the web app answers, then open the URL it prints. Sync server is already wired up via the env var.
+# work wait gives up after 60 seconds; --timeout 300 waits longer.
 open "$(work wait chat-streaming web)"
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
@@ -309,6 +310,9 @@ work create refactor-sidebar
 # Need to debug? Tail the sync server logs.
 work logs -f -w chat-streaming sync
 
+# Changed shared code? Restart both servers in one go.
+work restart chat-streaming web sync
+
 # Done with this branch — stop everything.
 work down chat-streaming
 ```
@@ -317,6 +321,7 @@ At any moment:
 
 ```sh
 work ps           # what's running here
+work ps feature-x # what's running in another workspace
 work ps -a        # what's running everywhere
 work watch        # live-refresh the ps table
 work watch -a     # live-refresh everything

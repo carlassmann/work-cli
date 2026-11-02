@@ -16,7 +16,7 @@ Commands:
 ${commandList}
 
 The workspace is implied from the current git branch. Pass it explicitly
-as a positional to up/setup/down/urls/cd/run/restart/logs/stop,
+as a positional to up/setup/down/urls/cd/ps/run/restart/logs/stop,
 or via -w where supported.
 State-only commands also work outside a project; ps/status/watch show all tracked state there.
 
@@ -29,6 +29,7 @@ Examples:
   work run web
   work run feature-x web
   work restart web
+  work restart web api
   work restart -w feature-x --all
   work logs -f web
   work stop web
@@ -176,24 +177,31 @@ Examples:
 
   stop: `work stop
 
-Stop a tracked command.
+Stop one or more tracked commands.
 
 Usage:
-  work stop [-p project] [-w workspace] <id>
-  work stop [workspace] <id>
+  work stop [-p project] [-w workspace] <id>...
+  work stop [workspace] <id>...
 
 Options:
   -p, --project <name>      Target project when outside a project.
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
 
+Workspace or id:
+  With two or more arguments and no -w, the first is an id when it names a
+  command but no workspace; otherwise it is the workspace. A name that is both
+  is read as the workspace; pass -w to name the workspace instead.
+
 Examples:
   work stop web
+  work stop web api
   work stop feature-x web
-  work stop -w feature-x web`,
+  work stop -w feature-x web api`,
 
   wait: `work wait
 
-Wait until a tracked command's URL answers with HTTP 2xx or 3xx.
+Wait until a tracked command's URL answers with HTTP 2xx or 3xx, for up to
+60 seconds unless --timeout says otherwise.
 Redirects are not followed. Prints the URL once it answers. With --tailscale it
 checks the local URL, since this machine cannot reach its own tailnet URL.
 
@@ -215,15 +223,15 @@ Examples:
 
   restart: `work restart
 
-Stop and start one configured command, or autoStart commands with --all.
+Stop and start configured commands, or autoStart commands with --all.
 
 Usage:
-  work restart [workspace] <command> [--cloudflare|--tailscale]
-  work restart [-p project] [-w workspace] <command> [--cloudflare|--tailscale]
+  work restart [workspace] <command>... [--cloudflare|--tailscale]
+  work restart [-p project] [-w workspace] <command>... [--cloudflare|--tailscale]
   work restart [-p project] [-w workspace] --all [--cloudflare|--tailscale]
 
 Arguments:
-  command      Configured command id.
+  command      Configured command id. Pass several to restart them in order.
 
 Options:
   -p, --project <name>      Target project when outside a project.
@@ -233,10 +241,17 @@ Options:
   --cloudflare              Publish routed commands through Cloudflare Tunnel.
   --tailscale               Serve routed commands to your tailnet devices.
 
+Workspace or command:
+  With two or more arguments and no -w, the first is a command when it names a
+  configured command but no workspace; otherwise it is the workspace. A name
+  that is both is read as the workspace; pass -w to name the workspace instead.
+  Outside a project the same rule uses tracked state.
+
 Examples:
   work restart web
+  work restart web api
   work restart feature-x web
-  work restart -w feature-x web
+  work restart -w feature-x web api
   work restart --all
   work restart -w feature-x --all`,
 
@@ -265,13 +280,22 @@ Examples:
   work run feature-x web
   work run -w feature-x web`,
 
-  ps: `work ps [-a|--all] [--json]
+  ps: `work ps [workspace] [-w workspace] [-a|--all] [--json]
 
 List tracked commands for the current workspace, or all tracked state outside a project.
 
 Usage:
   work ps
+  work ps feature-x
   work ps -a
+
+Arguments:
+  workspace    Workspace slug. Defaults to current git branch slug.
+
+Options:
+  -w, --workspace <name>    Same as the workspace argument.
+  -a, --all                 Show tracked commands across all workspaces.
+  --json                    Print an array of command objects.
 
 Output:
   status    project/workspace    command    pid    url
@@ -280,7 +304,7 @@ Status:
   commands show up/dead
 
 Empty state:
-  no tracked commands`,
+  no tracked commands for <project>/<workspace> (work up starts them; work ps -a lists every workspace)`,
 
   watch: `work watch [-a|--all] [-n seconds]
 
@@ -298,19 +322,21 @@ Options:
 Exit:
   ctrl-c`,
 
-  status: `work status [-a|--all] [--json]
+  status: `work status [workspace] [-w workspace] [-a|--all] [--json]
 
-List tracked commands for the current workspace, or all tracked state outside a project.
+Alias for work ps. Lists tracked commands for the current workspace, or all
+tracked state outside a project.
 
 Usage:
   work status
+  work status feature-x
   work status -a
 
 Output:
   status    project/workspace    command    pid    url
 
 Empty state:
-  no tracked commands`,
+  no tracked commands for <project>/<workspace> (work up starts them; work ps -a lists every workspace)`,
 
   logs: `work logs
 
@@ -355,7 +381,7 @@ URL shape:
   and a 6-character hash.
 
 Empty state:
-  no routed commands for <workspace>
+  no routed commands for <project>/<workspace>
 
 Examples:
   work urls
