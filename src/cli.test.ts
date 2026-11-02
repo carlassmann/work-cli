@@ -591,6 +591,197 @@ describe("cli", () => {
     assert.equal(result.stdout.trim(), "no tracked commands")
   })
 
+  test("ps accepts a workspace as argument or -w and names what it checked when empty", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: {},
+    }`)
+    await writeTrackedState(stateRoot, root, "tilly", "other", ["api"], process.pid)
+
+    const current = await runCli(["ps"], { cwd: root, stateRoot })
+    assert.equal(current.exitCode, 0)
+    assert.equal(current.stdout.trim(), "no tracked commands for tilly/main (work up starts them; work ps -a lists every workspace)")
+
+    for (const args of [["ps", "other"], ["ps", "-w", "other"], ["status", "--workspace=other"]]) {
+      const result = await runCli(args, { cwd: root, stateRoot })
+      assert.equal(result.exitCode, 0)
+      assert.equal(result.stderr, "")
+      assert.ok(result.stdout.includes("tilly/other"))
+      assert.ok(result.stdout.includes("api"))
+    }
+
+    const missing = await runCli(["ps", "feature/x"], { cwd: root, stateRoot })
+    assert.equal(missing.stdout.trim(), "no tracked commands for tilly/feature-x (work up feature-x starts them; work ps -a lists every workspace)")
+
+    const json = await runCli(["ps", "other", "--json"], { cwd: root, stateRoot })
+    assert.deepEqual(JSON.parse(json.stdout).map((record: { command: string }) => record.command), ["api"])
+
+    const withAll = await runCli(["ps", "-a", "other"], { cwd: root, stateRoot })
+    assert.equal(withAll.exitCode, 1)
+    assert.ok(withAll.stderr.includes("work ps --all accepts no workspace argument"))
+
+    const extra = await runCli(["ps", "-w", "other", "more"], { cwd: root, stateRoot })
+    assert.equal(extra.exitCode, 1)
+    assert.ok(extra.stderr.includes("unexpected argument: more"))
+
+    const urls = await runCli(["urls"], { cwd: root, stateRoot })
+    assert.equal(urls.stdout.trim(), "no routed commands for tilly/main")
+  })
+
+  test("ps filters tracked state by workspace outside a project", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await writeTrackedState(stateRoot, root, "tilly", "feature-x", ["web"], process.pid)
+    await writeTrackedState(stateRoot, root, "tilly", "other", ["api"], process.pid)
+
+    const result = await runCli(["ps", "feature-x"], { cwd: root, stateRoot })
+    assert.equal(result.exitCode, 0)
+    assert.ok(result.stdout.includes("tilly/feature-x"))
+    assert.ok(!result.stdout.includes("tilly/other"))
+
+    const missing = await runCli(["ps", "nope"], { cwd: root, stateRoot })
+    assert.equal(missing.stdout.trim(), "no tracked commands for workspace nope (work ps -a lists every workspace)")
+  })
+
+  test("restart reads a leading command id as a command unless it names a workspace", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      worktrees: { dir: "worktrees" },
+      commands: {
+        web: { run: "echo web" },
+        api: { run: "echo api" },
+      },
+    }`)
+
+    const unknown = await runCli(["restart", "web", "nope"], { cwd: root, stateRoot })
+    assert.equal(unknown.exitCode, 1)
+    assert.ok(unknown.stderr.includes("unknown command: nope"))
+    assert.equal(unknown.stdout, "")
+
+    const workspace = await runCli(["restart", "nope", "web"], { cwd: root, stateRoot })
+    assert.equal(workspace.exitCode, 1)
+    assert.equal(workspace.stderr.trim(), "workspace nope does not exist")
+
+    const flag = await runCli(["restart", "-w", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(flag.exitCode, 1)
+    assert.ok(flag.stderr.includes("workspace web does not exist; web is a command id. Usage: work restart [-w workspace] <command>..."))
+
+    const run = await runCli(["run", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(run.exitCode, 1)
+    assert.ok(run.stderr.includes("workspace web does not exist; web is a command id. Usage: work run [-w workspace] <command>"))
+
+    const all = await runCli(["restart", "--all", "web"], { cwd: root, stateRoot })
+    assert.equal(all.exitCode, 1)
+    assert.ok(all.stderr.includes("work restart --all accepts no command argument"))
+  })
+
+  test("restart and stop take several command ids", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      worktrees: { dir: "worktrees" },
+      commands: {
+        web: { run: ${JSON.stringify(command)} },
+        api: { run: ${JSON.stringify(command)} },
+      },
+    }`)
+    t.after(async () => {
+      await runCli(["down", "--all"], { cwd: root, stateRoot })
+      await runCli(["daemon", "stop"], { cwd: root, stateRoot })
+    })
+
+    const restart = await runCli(["restart", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(restart.stderr, "")
+    assert.equal(restart.exitCode, 0)
+    assert.match(restart.stdout, /^restarted web pid=\d+\nrestarted api pid=\d+\n$/)
+
+    const stop = await runCli(["stop", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(stop.exitCode, 0)
+    assert.equal(stop.stdout, "stopped tilly/main/web\nstopped tilly/main/api\n")
+
+    // A name that is both a workspace and a command keeps meaning the workspace.
+    await fs.mkdir(path.join(root, "worktrees", "web"), { recursive: true })
+    const both = await runCli(["restart", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(both.exitCode, 0)
+    assert.match(both.stdout, /^restarted api pid=\d+\n$/)
+
+    const stopBoth = await runCli(["stop", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(stopBoth.stdout, "stopped tilly/web/api\n")
+  })
+
+  test("stop reports every untracked id after stopping the rest", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default {
+      project: "tilly",
+      commands: { web: { run: "echo web" } },
+    }`)
+    await writeTrackedState(stateRoot, root, "tilly", "main", ["web"], 99999999)
+
+    const result = await runCli(["stop", "web", "nope", "gone"], { cwd: root, stateRoot })
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.stdout, "stopped tilly/main/web\n")
+    assert.ok(result.stderr.includes("no tracked command: main/nope"))
+    assert.ok(result.stderr.includes("no tracked command: main/gone"))
+  })
+
+  test("stop by tracked state stops what it finds and reports every missing id", async () => {
+    const root = await tempDir()
+    const project = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const statePath = path.join(stateRoot, "projects", "demo", "workspaces", "main", "state.json")
+
+    await initGitRepo(project)
+    await writeFile(path.join(project, "work.config.js"), `export default {
+      project: "demo",
+      commands: { web: { run: "echo web" } },
+    }`)
+
+    for (const [cwd, args] of [[root, ["stop", "web", "missing", "also-missing"]], [project, ["stop", "-p", "demo", "-w", "main", "web", "missing"]]] as const) {
+      await writeTrackedState(stateRoot, root, "demo", "main", ["web"], 99999999)
+
+      const result = await runCli([...args], { cwd, stateRoot })
+      assert.equal(result.exitCode, 1)
+      assert.equal(result.stdout, "stopped demo/main/web\n")
+      for (const id of args.slice(args.indexOf("web") + 1)) {
+        assert.ok(result.stderr.includes(`no tracked command: ${id}`), result.stderr)
+      }
+      assert.deepEqual(JSON.parse(await fs.readFile(statePath, "utf8")).commands, {})
+    }
+  })
+
+  test("stop and restart take several ids outside a project", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+
+    await writeTrackedState(stateRoot, root, "tilly", "feature-x", ["web"], 99999999)
+    await writeTrackedState(stateRoot, root, "tilly", "other", ["api"], 99999999)
+
+    const stop = await runCli(["stop", "web", "api"], { cwd: root, stateRoot })
+    assert.equal(stop.exitCode, 0)
+    assert.equal(stop.stdout, "stopped tilly/feature-x/web\nstopped tilly/other/api\n")
+
+    await writeTrackedState(stateRoot, root, "tilly", "feature-x", ["web"], 99999999)
+    const scoped = await runCli(["restart", "other", "web"], { cwd: root, stateRoot })
+    assert.equal(scoped.exitCode, 1)
+    assert.ok(scoped.stderr.includes("no tracked command: web"))
+  })
+
   test("down --all rejects workspace argument", async () => {
     const root = await tempDir()
     const result = await runCli(["down", "--all", "feature-x"], { cwd: root })
@@ -817,4 +1008,17 @@ async function readFileSoon(file: string) {
     }
   }
   return await fs.readFile(file, "utf8")
+}
+
+async function writeTrackedState(stateRoot: string, root: string, project: string, workspace: string, commands: Array<string>, pid: number) {
+  await writeFile(path.join(stateRoot, "projects", project, "workspaces", workspace, "state.json"), JSON.stringify({
+    project,
+    workspace,
+    branch: null,
+    root,
+    commands: Object.fromEntries(commands.map((id) => [id, {
+      id, label: id, command: id, run: id, route: null, cwd: root,
+      log: path.join(root, `${id}.log`), url: null, startedAt: new Date().toISOString(), pid,
+    }])),
+  }))
 }

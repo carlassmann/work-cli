@@ -223,13 +223,16 @@ ${zshSubcommands}
     return 0
   fi
 
-  if [[ "$cmd" == "restart" || "$cmd" == "down" ]] && [[ "$(_work_has_all_flag)" == "1" ]]; then
+  if [[ "$cmd" == "restart" || "$cmd" == "down" || "$cmd" == "ps" || "$cmd" == "status" ]] && [[ "$(_work_has_all_flag)" == "1" ]]; then
     return 0
   fi
 
   case $cmd in
     create|up|setup|down|urls|cd)
       (( pos == 1 )) && _work_emit workspaces
+      ;;
+    ps|status)
+      (( pos == 1 && has_workspace == 0 )) && _work_emit workspaces
       ;;
 	    run)
 	      if (( pos == 1 )); then
@@ -242,7 +245,7 @@ ${zshSubcommands}
 	        _work_emit configured
 	      fi
 	      ;;
-	    logs|stop|restart|wait)
+	    logs|wait)
 	      if (( pos == 1 )); then
 	        if [[ "$has_workspace" == "1" ]]; then
 	          _work_emit commands
@@ -252,6 +255,13 @@ ${zshSubcommands}
 	      elif (( pos == 2 && has_workspace == 0 )); then
 	        _work_emit commands
 	      fi
+      ;;
+    stop|restart)
+      if (( pos == 1 && has_workspace == 0 )); then
+        _work_emit workspaces commands
+      else
+        _work_emit commands
+      fi
       ;;
     help)
       (( pos == 1 )) && _work_emit help-topics
@@ -431,7 +441,7 @@ const bashScript = `_work() {
     return
   fi
 
-  if [[ "$cmd" == "restart" || "$cmd" == "down" ]] && [[ "$(_work_has_all_flag)" == "1" ]]; then
+  if [[ "$cmd" == "restart" || "$cmd" == "down" || "$cmd" == "ps" || "$cmd" == "status" ]] && [[ "$(_work_has_all_flag)" == "1" ]]; then
     COMPREPLY=()
     return
   fi
@@ -439,6 +449,11 @@ const bashScript = `_work() {
   case "$cmd" in
     create|up|setup|down|urls|cd)
       if [[ $pos -eq 1 ]]; then
+        values=$(work _complete workspaces 2>/dev/null)
+      fi
+      ;;
+    ps|status)
+      if [[ $pos -eq 1 && "$has_workspace" == "0" ]]; then
         values=$(work _complete workspaces 2>/dev/null)
       fi
       ;;
@@ -453,7 +468,7 @@ const bashScript = `_work() {
 	        values=$(work _complete configured 2>/dev/null)
 	      fi
 	      ;;
-	    logs|stop|restart|wait)
+	    logs|wait)
 	      if [[ $pos -eq 1 ]]; then
 	        if [[ "$has_workspace" == "1" ]]; then
 	          values=$(work _complete commands 2>/dev/null)
@@ -463,6 +478,13 @@ const bashScript = `_work() {
 	      elif [[ $pos -eq 2 && "$has_workspace" == "0" ]]; then
 	        values=$(work _complete commands 2>/dev/null)
 	      fi
+      ;;
+    stop|restart)
+      if [[ $pos -eq 1 && "$has_workspace" == "0" ]]; then
+        values=$(work _complete workspaces commands 2>/dev/null)
+      else
+        values=$(work _complete commands 2>/dev/null)
+      fi
       ;;
     help)
       if [[ $pos -eq 1 ]]; then

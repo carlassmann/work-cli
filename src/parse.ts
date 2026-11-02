@@ -143,6 +143,25 @@ export function parseArgs<D extends FlagDef>(
   })
 }
 
+export type WorkspaceCommands = {
+  readonly workspace: string | undefined
+  readonly commands: ReadonlyArray<string>
+}
+
+// With two or more positionals the first is the workspace, unless the caller found it names a command and no workspace.
+export function splitWorkspaceCommands(
+  positional: ReadonlyArray<string>,
+  workspaceFlag: string | undefined,
+  firstIsCommandOnly: boolean,
+): WorkspaceCommands {
+  if (workspaceFlag || firstIsCommandOnly || positional.length < 2) {
+    return { workspace: workspaceFlag, commands: [...new Set(positional)] }
+  }
+
+  const [workspace, ...commands] = positional
+  return { workspace, commands: [...new Set(commands)] }
+}
+
 export const booleanFlag = (alias?: string): BooleanFlag => alias ? { type: "boolean", alias } : { type: "boolean" }
 export const valueFlag = (alias?: string): ValueFlag => alias ? { type: "value", alias } : { type: "value" }
 

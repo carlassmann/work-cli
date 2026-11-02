@@ -1,8 +1,12 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import { initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
+
+const execFileAsync = promisify(execFile)
 
 describe("completions", () => {
   test("emits zsh script with subcommands and shebang", async () => {
@@ -219,6 +223,32 @@ describe("completions", () => {
 
     assert.equal(result.exitCode, 1)
     assert.ok(result.stderr.includes("workspace nonexistent does not exist"))
+  })
+
+  test("bash completes a workspace for ps and command ids after the first restart or stop argument", async () => {
+    const root = await tempDir()
+    const script = path.join(root, "work.bash")
+    const generated = await runCli(["completions", "bash"], { cwd: root })
+    await writeFile(script, generated.stdout)
+
+    const complete = async (words: Array<string>) => {
+      const source = `source ${JSON.stringify(script)}
+work() { shift; echo "$@"; }
+COMP_WORDS=(${words.map((word) => JSON.stringify(word)).join(" ")})
+COMP_CWORD=${words.length - 1}
+_work
+echo "\${COMPREPLY[*]}"`
+      const { stdout } = await execFileAsync("bash", ["-c", source])
+      return stdout.trim()
+    }
+
+    assert.equal(await complete(["work", "ps", ""]), "workspaces")
+    assert.equal(await complete(["work", "ps", "-a", ""]), "")
+    assert.equal(await complete(["work", "ps", "-w", "x", ""]), "")
+    assert.equal(await complete(["work", "restart", ""]), "workspaces commands")
+    assert.equal(await complete(["work", "restart", "web", "api", ""]), "commands")
+    assert.equal(await complete(["work", "stop", "-w", "x", "web", ""]), "commands")
+    assert.equal(await complete(["work", "logs", "x", "web", ""]), "")
   })
 
   test("_complete deduplicates across kinds", async () => {

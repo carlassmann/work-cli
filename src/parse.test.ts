@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
+import { booleanFlag, parseArgs, splitWorkspaceCommands, valueFlag } from "./parse.js"
 
 describe("parseArgs", () => {
   test("collects positionals", () => {
@@ -128,5 +128,27 @@ describe("parseArgs", () => {
 
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.error.message, /missing value for --workspace/)
+  })
+})
+
+describe("splitWorkspaceCommands", () => {
+  test("reads a single positional as a command", () => {
+    assert.deepEqual(splitWorkspaceCommands(["web"], undefined, false), { workspace: undefined, commands: ["web"] })
+  })
+
+  test("reads the first of several positionals as the workspace by default", () => {
+    assert.deepEqual(splitWorkspaceCommands(["feature-x", "web", "api"], undefined, false), { workspace: "feature-x", commands: ["web", "api"] })
+  })
+
+  test("reads every positional as a command when the first names only a command", () => {
+    assert.deepEqual(splitWorkspaceCommands(["web", "api"], undefined, true), { workspace: undefined, commands: ["web", "api"] })
+  })
+
+  test("reads every positional as a command when -w names the workspace", () => {
+    assert.deepEqual(splitWorkspaceCommands(["web", "api"], "feature-x", false), { workspace: "feature-x", commands: ["web", "api"] })
+  })
+
+  test("drops repeated commands", () => {
+    assert.deepEqual(splitWorkspaceCommands(["web", "web"], "feature-x", false), { workspace: "feature-x", commands: ["web"] })
   })
 })
