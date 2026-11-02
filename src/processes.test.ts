@@ -244,6 +244,7 @@ describe("process lifecycle", () => {
         sync: {
           run: "echo sync",
           route: true,
+          env: { PORTLESS_STATE_DIR: await portlessStateDir(8443) },
         },
       },
     }
@@ -251,24 +252,79 @@ describe("process lifecycle", () => {
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
     await fs.writeFile(path.join(root, ".env.local"), "WORKSPACE_VALUE=workspace\n")
 
-    const started = await startCommand(config, workspace, "web", { mode: "local" }, { ...process.env, PORTLESS_PORT: "1355" })
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, { ...process.env, PORTLESS_STATE_DIR: await portlessStateDir(1355) })
     assert.equal(started.ok, true)
     assert.equal(started.ok && started.value.record.url, "https://web-feature-x-tilly.localhost:1355")
 
     const env = JSON.parse(await readSoon(output))
     assert.deepEqual(env, {
       web: "https://web-feature-x-tilly.localhost:1355",
-      sync: "https://sync-feature-x-tilly.localhost:1355",
-      syncWs: "wss://sync-feature-x-tilly.localhost:1355",
+      sync: "https://sync-feature-x-tilly.localhost:8443",
+      syncWs: "wss://sync-feature-x-tilly.localhost:8443",
       workspaceValue: "command",
       urls: JSON.stringify({
         web: "https://web-feature-x-tilly.localhost:1355",
-        sync: "https://sync-feature-x-tilly.localhost:1355",
+        sync: "https://sync-feature-x-tilly.localhost:8443",
       }),
     })
 
     const state = await readWorkspaceState("tilly", "feature-x")
     assert.deepEqual(state.ok ? state.value?.env : undefined, { WORKSPACE_VALUE: "configured" })
+  })
+
+  test("restarts a record from an older work version on the URL Portless serves", async () => {
+    const root = await tempDir()
+    const bin = await tempDir("work-cli-bin-")
+    const routeFile = path.join(root, "route.txt")
+    const output = path.join(root, "env.json")
+    // Stands in for portless: records the name it was given and runs the command.
+    await fs.writeFile(path.join(bin, "portless"), `#!/bin/sh\nprintf '%s' "$1" > ${JSON.stringify(routeFile)}\nshift\nexec "$@"\n`, { mode: 0o755 })
+    process.env["PATH"] = `${bin}:${process.env["PATH"]}`
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const name = "ruler-fix-tabs-size-strip-instead-of-touch-t"
+    const config: DevConfig = {
+      project: "syntwin-mono",
+      commands: {
+        preview: {
+          run: `node -e 'require("fs").writeFileSync(${JSON.stringify(output)}, JSON.stringify({ preview: process.env.WORK_PREVIEW_URL, urls: process.env.WORK_URLS })); setTimeout(() => {}, 30000)'`,
+          route: true,
+        },
+        web: { run: "echo web", route: true },
+      },
+    }
+    const environment = { ...process.env, PORTLESS_STATE_DIR: await portlessStateDir(1355) }
+    const started = await startCommand(config, { ...testWorkspace(root, name), project: "syntwin-mono" }, "preview", { mode: "local" }, environment)
+    assert.ok(started.ok)
+
+    // What work 10e93a0 recorded: the full name, no port.
+    const legacyUrl = (command: string) => `https://${command}-${name}-syntwin-mono.localhost`
+    const state = await readWorkspaceState("syntwin-mono", name)
+    assert.ok(state.ok && state.value)
+    if (!state.ok || !state.value) return
+    state.value.urls = { preview: legacyUrl("preview"), web: legacyUrl("web") }
+    Object.assign(state.value.commands["preview"]!, { route: `preview-${name}-syntwin-mono`, url: legacyUrl("preview"), localUrl: legacyUrl("preview") })
+    assert.equal((await writeWorkspaceState(state.value)).ok, true)
+    await fs.rm(output, { force: true })
+
+    try {
+      const restarted = await restartTrackedCommand("syntwin-mono", name, "preview", environment)
+      assert.ok(restarted.ok)
+      const expected = {
+        preview: `https://preview-${name}-syn-154ac3.localhost:1355`,
+        web: `https://web-${name}-syntwin-mono.localhost:1355`,
+      }
+      if (restarted.ok) {
+        assert.equal(restarted.value.record.route, `preview-${name}-syn-154ac3`)
+        assert.equal(restarted.value.record.url, expected.preview)
+        assert.equal(restarted.value.record.localUrl, expected.preview)
+      }
+      assert.deepEqual(JSON.parse(await readSoon(output)), { preview: expected.preview, urls: JSON.stringify(expected) })
+      assert.equal(await fs.readFile(routeFile, "utf8"), `preview-${name}-syn-154ac3`)
+      const saved = await readWorkspaceState("syntwin-mono", name)
+      assert.deepEqual(saved.ok ? saved.value?.urls : undefined, expected)
+    } finally {
+      await stopCommand("syntwin-mono", name, "preview")
+    }
   })
 
   test("uses the invoking client's environment instead of the daemon environment", async () => {
@@ -485,6 +541,12 @@ async function readSoonValue(file: string, expected: string) {
   }
 
   return await fs.readFile(file, "utf8")
+}
+
+async function portlessStateDir(port: number) {
+  const dir = await tempDir("portless-state-")
+  await fs.writeFile(path.join(dir, "proxy.port"), `${port}\n`)
+  return dir
 }
 
 function testWorkspace(root: string, workspace = "feature-x"): WorkspaceRecord {

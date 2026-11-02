@@ -77,7 +77,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 9
+export const DAEMON_PROTOCOL_VERSION = 10
 
 export type DaemonCommand =
   | {

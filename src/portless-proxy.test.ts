@@ -1,6 +1,7 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
+import http from "node:http"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
@@ -53,6 +54,27 @@ describe("probePortless", () => {
     const stateDir = await tempDir("portless-state-")
     await fs.writeFile(path.join(stateDir, "proxy.port"), "70000\n")
     assert.equal(await portlessPort({ PORTLESS_STATE_DIR: stateDir, PORTLESS_PORT: "65536" }), 443)
+  })
+
+  test("prefers the port a running Portless recorded over PORTLESS_PORT, like Portless itself", async () => {
+    const home = await tempDir("portless-home-")
+    const portless = http.createServer((_request, response) => response.writeHead(404, { "x-portless": "1" }).end())
+    await new Promise<void>((resolve) => portless.listen(0, "127.0.0.1", resolve))
+    const { port } = portless.address() as net.AddressInfo
+    await fs.mkdir(path.join(home, ".portless"))
+    await fs.writeFile(path.join(home, ".portless", "proxy.port"), `${port}\n`)
+
+    try {
+      assert.equal(await portlessPort({ HOME: home, PORTLESS_PORT: "9" }), port)
+    } finally {
+      portless.close()
+    }
+  })
+
+  test("uses the port recorded in PORTLESS_STATE_DIR before PORTLESS_PORT", async () => {
+    const stateDir = await tempDir("portless-state-")
+    await fs.writeFile(path.join(stateDir, "proxy.port"), "8443\n")
+    assert.equal(await portlessPort({ PORTLESS_STATE_DIR: stateDir, PORTLESS_PORT: "9" }), 8443)
   })
 
   test("reads the port Portless recorded when PORTLESS_PORT is unset", async () => {

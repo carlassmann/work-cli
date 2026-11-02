@@ -2,6 +2,7 @@ import { commandExists } from "./shell.js"
 import { cloudflareHostname } from "./cloudflare.js"
 import { tailscaleHostname } from "./tailscale.js"
 import { portlessLabel, routeName, routeUrl } from "./names.js"
+import { portlessPort } from "./portless-proxy.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
 import type { CommandConfig, DevConfig, Exposure } from "./types.js"
@@ -27,10 +28,10 @@ export function publicUrl(config: DevConfig, workspace: string, id: string, comm
   return `https://${exposure.mode === "tailscale" ? tailscaleHostname(route, exposure) : cloudflareHostname(route, exposure)}`
 }
 
-export function routeUrlsForConfig(config: DevConfig, workspace: string, port: number, exposure: Exposure = { mode: "local" }) {
+export function routeUrlsForConfig(config: DevConfig, workspace: string, ports: Record<string, number>, exposure: Exposure = { mode: "local" }) {
   return Object.fromEntries(
     Object.entries(config.commands)
-      .map(([id, command]) => [id, publicUrl(config, workspace, id, command, exposure, port)])
+      .map(([id, command]) => [id, publicUrl(config, workspace, id, command, exposure, ports[id] ?? 443)])
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   )
 }
@@ -56,8 +57,40 @@ export function routeEnvironment(urls: Record<string, string>) {
   return env
 }
 
-export function routeEnvironmentForConfig(config: DevConfig, workspace: string, port: number, exposure: Exposure = { mode: "local" }) {
-  return routeEnvironment(routeUrlsForConfig(config, workspace, port, exposure))
+export function routeEnvironmentForConfig(config: DevConfig, workspace: string, ports: Record<string, number>, exposure: Exposure = { mode: "local" }) {
+  return routeEnvironment(routeUrlsForConfig(config, workspace, ports, exposure))
+}
+
+// Each routed command runs portless with its own env on top of the workspace env, and a
+// PORTLESS_* override there can point it at another proxy.
+export async function portlessPorts(environment: NodeJS.ProcessEnv, commandEnvironments: Record<string, Record<string, string> | undefined>) {
+  const lookups = new Map<string, Promise<number>>()
+  const ports: Record<string, number> = {}
+  for (const [id, commandEnvironment] of Object.entries(commandEnvironments)) {
+    const effective = { ...environment, ...commandEnvironment }
+    const key = ["PORTLESS_STATE_DIR", "PORTLESS_PORT", "HOME"].map((name) => effective[name] ?? "").join("\0")
+    if (!lookups.has(key)) lookups.set(key, portlessPort(effective))
+    ports[id] = await lookups.get(key)!
+  }
+  return ports
+}
+
+export function portlessPortsForConfig(config: DevConfig, environment: NodeJS.ProcessEnv) {
+  const routed = Object.entries(config.commands).filter(([, command]) => command.route === true)
+  return portlessPorts({ ...config.env, ...environment }, Object.fromEntries(routed.map(([id, command]) => [id, command.env])))
+}
+
+// Rebuilds a recorded *.localhost URL for the proxy port, so records from older work versions
+// or from before a Portless port change get the URL Portless serves now. Other URLs stay.
+export function refreshRouteUrl(url: string, port: number) {
+  let hostname: string
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return url
+  }
+  const label = hostname.endsWith(".localhost") ? hostname.slice(0, -".localhost".length) : ""
+  return label && !label.includes(".") ? routeUrl(label, port) : url
 }
 
 export function websocketUrl(url: string) {

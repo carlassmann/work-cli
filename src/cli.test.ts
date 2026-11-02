@@ -671,7 +671,9 @@ describe("cli", () => {
         },
       }`)
 
-    const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot, env: { PORTLESS_PORT: "1355" } })
+    const portlessState = await tempDir("portless-state-")
+    await fs.writeFile(path.join(portlessState, "proxy.port"), "1355\n")
+    const result = await runCli(["up", "feature-x", "--create"], { cwd: root, stateRoot, env: { PORTLESS_STATE_DIR: portlessState } })
 
     assert.equal(result.stderr, "")
     assert.equal(result.exitCode, 0)

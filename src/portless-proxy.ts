@@ -14,15 +14,53 @@ const PROBE_TIMEOUT_MS = 2_000
 
 export type PortlessProxyState = "ok" | "stopped" | "foreign"
 
-// Mirrors how Portless finds its own proxy: PORTLESS_PORT, then the port it recorded.
+const DISCOVERY_TIMEOUT_MS = 500
+const FALLBACK_PORT = 1355
+const LEGACY_STATE_DIR = "/tmp/portless"
+
+// The port a `portless` started with this environment serves on, found the way Portless 0.15
+// discovers its proxy: a PORTLESS_STATE_DIR's recorded port, a running proxy recorded in
+// ~/.portless or /tmp/portless, a running proxy on a well-known port, and only then
+// PORTLESS_PORT. When nothing runs, Portless starts one on the recorded port or its default.
 export async function portlessPort(environment: NodeJS.ProcessEnv) {
-  const fromEnvironment = Number(environment["PORTLESS_PORT"])
-  if (isPort(fromEnvironment)) return fromEnvironment
+  const configured = parsePort(environment["PORTLESS_PORT"])
+  if (environment["PORTLESS_STATE_DIR"]) return await recordedPort(portlessStateDir(environment)) ?? configured ?? 443
+
+  const recorded = await recordedPort(portlessStateDir(environment))
+  if (recorded && await answersAsPortless(recorded)) return recorded
+  const legacy = await recordedPort(LEGACY_STATE_DIR)
+  if (legacy && await answersAsPortless(legacy)) return legacy
+  for (const port of new Set([443, 80, FALLBACK_PORT, configured ?? FALLBACK_PORT])) {
+    if (await answersAsPortless(port)) return port
+  }
+  return recorded ?? configured ?? 443
+}
+
+async function recordedPort(stateDir: string) {
   try {
-    const recorded = Number((await fs.readFile(path.join(portlessStateDir(environment), "proxy.port"), "utf8")).trim())
-    if (isPort(recorded)) return recorded
-  } catch {}
-  return 443
+    return parsePort(await fs.readFile(path.join(stateDir, "proxy.port"), "utf8"))
+  } catch {
+    return null
+  }
+}
+
+function parsePort(value: string | undefined) {
+  const port = Number(value?.trim() || Number.NaN)
+  return isPort(port) ? port : null
+}
+
+// Portless's own liveness check: plain HTTP, answered with X-Portless: 1.
+function answersAsPortless(port: number) {
+  return new Promise<boolean>((resolve) => {
+    const request = http.request({ host: "127.0.0.1", port, method: "HEAD", path: "/" }, (response) => {
+      response.resume()
+      resolve(response.headers["x-portless"] === "1")
+    })
+    const deadline = setTimeout(() => request.destroy(new Error("timeout")), DISCOVERY_TIMEOUT_MS)
+    request.on("close", () => clearTimeout(deadline))
+    request.on("error", () => resolve(false))
+    request.end()
+  })
 }
 
 function isPort(value: number) {
@@ -104,7 +142,7 @@ async function readFileOrEmpty(file: string) {
 }
 
 function portlessStateDir(environment: NodeJS.ProcessEnv) {
-  return environment["PORTLESS_STATE_DIR"] ? resolveHome(environment["PORTLESS_STATE_DIR"]) : path.join(os.homedir(), ".portless")
+  return environment["PORTLESS_STATE_DIR"] ? resolveHome(environment["PORTLESS_STATE_DIR"]) : path.join(environment["HOME"] || os.homedir(), ".portless")
 }
 
 // Portless marks an HTTPS proxy by the presence of proxy.tls.

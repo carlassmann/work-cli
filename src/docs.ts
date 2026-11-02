@@ -263,9 +263,12 @@ Examples:
   https://sync-feature-x-tilly.localhost
   https://api-fix-auth-my-app.localhost:1355
 
-The port is the one Portless listens on (PORTLESS_PORT, then the port it
-recorded in ~/.portless/proxy.port) and is left out when it is 443. work reads
-it when it starts a command, so WORK_URL and friends match the running proxy.
+The port is the one the portless child would use, left out when it is 443.
+work finds it the way Portless does: the port recorded in PORTLESS_STATE_DIR,
+then a running proxy recorded in ~/.portless or /tmp/portless, then a running
+proxy on 443, 80 or 1355, and only then PORTLESS_PORT. A command's own env
+counts too. work reads it when it starts or restarts a command, so WORK_URL and
+friends match the running proxy, and a restart moves older records to it.
 
 A name longer than one DNS label (63 characters) is shortened the way Portless
 shortens it: the first 56 characters, trailing dashes removed, then a dash and

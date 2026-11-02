@@ -21,8 +21,8 @@ import { commandLogFile, listWorkspaceStates, readWorkspaceState } from "./state
 import { docsText, docsTopics } from "./docs.js"
 import { commandHelp, helpSection, rootHelp } from "./help.js"
 import { booleanFlag, parseArgs, valueFlag } from "./parse.js"
-import { ensurePortless, routeEnvironmentForConfig, usesPortless } from "./portless.js"
-import { portlessPort, probePortless } from "./portless-proxy.js"
+import { ensurePortless, portlessPortsForConfig, routeEnvironmentForConfig, usesPortless } from "./portless.js"
+import { probePortless } from "./portless-proxy.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { commandExists, existsAt } from "./shell.js"
 import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-client.js"
@@ -1214,7 +1214,7 @@ async function runWorkspaceSetup(
   }
 
   console.log(`setup ${workspace.workspace}`)
-  const port = await portlessPort({ ...config.env, ...environment })
+  const ports = await portlessPortsForConfig(config, environment)
 
   return new Promise((resolve) => {
     const child = spawn(setup, {
@@ -1223,7 +1223,7 @@ async function runWorkspaceSetup(
       stdio: "inherit",
       env: {
         ...childEnvironment({ ...config.env, ...environment }),
-        ...workspaceSetupEnv(config, sourceRoot, workspace, exposure, port),
+        ...workspaceSetupEnv(config, sourceRoot, workspace, exposure, ports),
       },
     })
 
@@ -1246,14 +1246,14 @@ async function runWorkspaceSetup(
   })
 }
 
-function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: WorkspaceRecord, exposure: Exposure, port: number) {
+function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: WorkspaceRecord, exposure: Exposure, ports: Record<string, number>) {
   return {
     WORK_PROJECT: config.project,
     WORK_WORKSPACE: workspace.workspace,
     WORK_ROOT: workspace.root,
     WORK_SOURCE_ROOT: sourceRoot,
     WORK_BRANCH: workspace.branch ?? "",
-    ...routeEnvironmentForConfig(config, workspace.workspace, port, exposure),
+    ...routeEnvironmentForConfig(config, workspace.workspace, ports, exposure),
   }
 }
 
