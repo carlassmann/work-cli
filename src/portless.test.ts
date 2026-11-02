@@ -67,7 +67,7 @@ describe("portless", () => {
         sync: { run: "bun run sync", route: true },
         worker: { run: "bun run worker" },
       },
-    }, "feature-x")
+    }, "feature-x", 443)
 
     assert.equal(env.WORK_URL, "https://web-feature-x-tilly.localhost")
     assert.equal(env.WORK_WEB_URL, "https://web-feature-x-tilly.localhost")
@@ -84,6 +84,17 @@ describe("portless", () => {
     })
   })
 
+  test("exports URLs that Portless serves on a non-default port", () => {
+    const workspace = "ruler-fix-tabs-size-strip-instead-of-touch-t"
+    const command = { run: "bun run preview", route: true }
+    const env = routeEnvironmentForConfig({ project: "syntwin-mono", commands: { web: { run: "bun run dev", route: true }, preview: command } }, workspace, 1355)
+
+    assert.equal(env.WORK_WEB_URL, `https://web-${workspace}-syntwin-mono.localhost:1355`)
+    assert.equal(env.WORK_WEB_WS_URL, `wss://web-${workspace}-syntwin-mono.localhost:1355`)
+    assert.equal(env.WORK_PREVIEW_URL, `https://preview-${workspace}-syn-154ac3.localhost:1355`)
+    assert.equal(commandRoute({ project: "syntwin-mono", commands: {} }, workspace, "preview", command), `preview-${workspace}-syn-154ac3`)
+  })
+
   test("converts http URLs to websocket URLs", () => {
     assert.equal(websocketUrl("http://web.local"), "ws://web.local")
     assert.equal(websocketUrl("https://web.local"), "wss://web.local")
@@ -96,7 +107,7 @@ describe("portless", () => {
         web: { run: "bun run dev", route: true },
         sync: { run: "bun run sync", route: true },
       },
-    }, "feature-x", {
+    }, "feature-x", 1355, {
       mode: "cloudflare",
       machine: "cbook",
       domain: "example.com",

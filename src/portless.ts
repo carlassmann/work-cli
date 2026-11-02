@@ -1,7 +1,7 @@
 import { commandExists } from "./shell.js"
 import { cloudflareHostname } from "./cloudflare.js"
 import { tailscaleHostname } from "./tailscale.js"
-import { routeName, routeUrl } from "./names.js"
+import { portlessLabel, routeName, routeUrl } from "./names.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
 import type { CommandConfig, DevConfig, Exposure } from "./types.js"
@@ -10,26 +10,27 @@ export function usesPortless(command: CommandConfig) {
   return command.portless !== false && command.route === true
 }
 
-export function portlessUrl(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
+// port is the Portless proxy port, which the URL carries unless it is 443.
+export function portlessUrl(config: DevConfig, workspace: string, id: string, command: CommandConfig, port: number) {
   if (command.route !== true) {
     return null
   }
 
-  return routeUrl(config.project, workspace, id, command.routeName)
+  return routeUrl(routeName(config.project, workspace, id, command.routeName), port)
 }
 
-export function publicUrl(config: DevConfig, workspace: string, id: string, command: CommandConfig, exposure: Exposure) {
+export function publicUrl(config: DevConfig, workspace: string, id: string, command: CommandConfig, exposure: Exposure, port: number) {
   if (command.route !== true) return null
-  if (exposure.mode === "local") return portlessUrl(config, workspace, id, command)
+  if (exposure.mode === "local") return portlessUrl(config, workspace, id, command, port)
 
   const route = routeName(config.project, workspace, id, command.routeName)
   return `https://${exposure.mode === "tailscale" ? tailscaleHostname(route, exposure) : cloudflareHostname(route, exposure)}`
 }
 
-export function routeUrlsForConfig(config: DevConfig, workspace: string, exposure: Exposure = { mode: "local" }) {
+export function routeUrlsForConfig(config: DevConfig, workspace: string, port: number, exposure: Exposure = { mode: "local" }) {
   return Object.fromEntries(
     Object.entries(config.commands)
-      .map(([id, command]) => [id, publicUrl(config, workspace, id, command, exposure)])
+      .map(([id, command]) => [id, publicUrl(config, workspace, id, command, exposure, port)])
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   )
 }
@@ -55,8 +56,8 @@ export function routeEnvironment(urls: Record<string, string>) {
   return env
 }
 
-export function routeEnvironmentForConfig(config: DevConfig, workspace: string, exposure: Exposure = { mode: "local" }) {
-  return routeEnvironment(routeUrlsForConfig(config, workspace, exposure))
+export function routeEnvironmentForConfig(config: DevConfig, workspace: string, port: number, exposure: Exposure = { mode: "local" }) {
+  return routeEnvironment(routeUrlsForConfig(config, workspace, port, exposure))
 }
 
 export function websocketUrl(url: string) {
@@ -70,7 +71,7 @@ function envName(id: string) {
 }
 
 export function commandRoute(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
-  return usesPortless(command) ? routeName(config.project, workspace, id, command.routeName) : null
+  return usesPortless(command) ? portlessLabel(routeName(config.project, workspace, id, command.routeName)) : null
 }
 
 export function commandProcess(run: string, route: string | null, backendPort?: number) {

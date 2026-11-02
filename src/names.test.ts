@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { exposureLabel, routeName, routeUrl, slugify, validateSlug } from "./names.js"
+import { exposureLabel, portlessLabel, routeName, routeUrl, slugify, validateSlug } from "./names.js"
 
 describe("names", () => {
   test("slugifies branch names for workspace aliases", () => {
@@ -13,9 +13,19 @@ describe("names", () => {
     assert.equal(routeName("tilly", "feature-x", "web", "app"), "app-feature-x-tilly")
   })
 
-  test("derives canonical route urls", () => {
-    assert.equal(routeUrl("tilly", "feature-x", "web"), "https://web-feature-x-tilly.localhost")
-    assert.equal(routeUrl("tilly", "feature-x", "web", "app"), "https://app-feature-x-tilly.localhost")
+  test("derives route urls on the Portless proxy port", () => {
+    assert.equal(routeUrl("web-feature-x-tilly", 443), "https://web-feature-x-tilly.localhost")
+    assert.equal(routeUrl("web-feature-x-tilly", 1355), "https://web-feature-x-tilly.localhost:1355")
+  })
+
+  // Expected labels come from truncateLabel in Portless 0.15.12 (dist/cli.js).
+  test("shortens long route names the way Portless does", () => {
+    const route = routeName("syntwin-mono", "ruler-fix-tabs-size-strip-instead-of-touch-t", "preview")
+    assert.equal(portlessLabel(route), "preview-ruler-fix-tabs-size-strip-instead-of-touch-t-syn-154ac3")
+    assert.equal(routeUrl(route, 1355), "https://preview-ruler-fix-tabs-size-strip-instead-of-touch-t-syn-154ac3.localhost:1355")
+    assert.equal(portlessLabel(`web-${"x".repeat(51)}-feature-tilly`), `web-${"x".repeat(51)}-10f294`)
+    assert.equal(portlessLabel("a".repeat(63)), "a".repeat(63))
+    assert.equal(portlessLabel("a".repeat(64)), `${"a".repeat(56)}-ffe054`)
   })
 
   test("keeps exposure labels DNS-safe and stable within 63 characters", () => {

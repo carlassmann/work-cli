@@ -8,6 +8,7 @@ import { resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { appError, debugLog, describe, err, errResult, ok, tryAsync, trySync } from "./result.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
+import { portlessPort } from "./portless-proxy.js"
 import { commandProcess, commandRoute, portlessUrl, publicUrl, routeEnvironment, routeEnvironmentForConfig, routeUrlsForConfig } from "./portless.js"
 import { isPidRunning, isTrackedPidRunning } from "./shell.js"
 import type { Result } from "./result.js"
@@ -67,6 +68,7 @@ export async function startCommand(
   }
 
   const route = commandRoute(config, workspace.workspace, id, command)
+  const port = await portlessPort({ ...config.env, ...environment.value })
   if (exposure.mode !== "local" && command.route === true && !route) {
     return errResult("ProcessError", `command ${id} must use Portless to publish through ${exposure.mode === "cloudflare" ? "Cloudflare Tunnel" : "Tailscale"}`)
   }
@@ -85,7 +87,7 @@ export async function startCommand(
       WORK_PROJECT: config.project,
       WORK_WORKSPACE: workspace.workspace,
       WORK_COMMAND: id,
-      ...routeEnvironmentForConfig(config, workspace.workspace, exposure),
+      ...routeEnvironmentForConfig(config, workspace.workspace, port, exposure),
       ...command.env,
     },
   })
@@ -102,8 +104,8 @@ export async function startCommand(
     route,
     cwd,
     log,
-    url: publicUrl(config, workspace.workspace, id, command, exposure),
-    localUrl: portlessUrl(config, workspace.workspace, id, command),
+    url: publicUrl(config, workspace.workspace, id, command, exposure, port),
+    localUrl: portlessUrl(config, workspace.workspace, id, command, port),
     exposure,
     ...(backendPort ? { backendPort } : {}),
     ...(command.env ? { env: command.env } : {}),
@@ -124,7 +126,7 @@ export async function startCommand(
   if (config.env) nextState.env = childEnvironment(config.env)
   else delete nextState.env
   nextState.exposure = exposure
-  nextState.urls = routeUrlsForConfig(config, workspace.workspace, exposure)
+  nextState.urls = routeUrlsForConfig(config, workspace.workspace, port, exposure)
   nextState.commands[id] = record
 
   const write = await writeWorkspaceState(nextState)

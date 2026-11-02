@@ -256,12 +256,21 @@ Setup behavior:
   work setup                     runs setup for the current workspace`,
 
   urls: `Canonical URL shape:
-  {command}-{workspace}-{project}.localhost
+  https://{command}-{workspace}-{project}.localhost[:port]
 
 Examples:
-  web-feature-x-tilly.localhost
-  sync-feature-x-tilly.localhost
-  api-fix-auth-my-app.localhost
+  https://web-feature-x-tilly.localhost
+  https://sync-feature-x-tilly.localhost
+  https://api-fix-auth-my-app.localhost:1355
+
+The port is the one Portless listens on (PORTLESS_PORT, then the port it
+recorded in ~/.portless/proxy.port) and is left out when it is 443. work reads
+it when it starts a command, so WORK_URL and friends match the running proxy.
+
+A name longer than one DNS label (63 characters) is shortened the way Portless
+shortens it: the first 56 characters, trailing dashes removed, then a dash and
+the first 6 hex characters of its SHA-256:
+  preview-ruler-fix-tabs-size-strip-instead-of-touch-t-syn-154ac3.localhost
 
 With route: true:
   command id becomes first URL segment.
@@ -270,7 +279,9 @@ With route: true, routeName: "app":
   app-feature-x-tilly.localhost
 
 Routed commands are started through portless:
-  portless web-feature-x-tilly sh -lc "bun run dev"`,
+  portless web-feature-x-tilly sh -lc "bun run dev"
+
+Use WORK_<ID>_URL or work urls instead of building URLs by hand.`,
 
   portless: `work coexists with portless like it coexists with git.
 

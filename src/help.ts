@@ -349,7 +349,10 @@ Options:
   -p, --project <name>      Filter tracked state by project.
 
 URL shape:
-  {command}-{workspace}-{project}.localhost
+  https://{command}-{workspace}-{project}.localhost[:port]
+  The port is the Portless proxy port, left out when it is 443. A name over
+  63 characters is shortened like Portless does: its first 56 characters
+  and a 6-character hash.
 
 Empty state:
   no routed commands for <workspace>

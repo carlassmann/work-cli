@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { appError, err, errResult, formatError, ok, tryAsync, trySync } from "./result.js"
+import { appError, describe as describeError, err, errResult, formatError, ok, tryAsync, trySync } from "./result.js"
 
 describe("result", () => {
   test("ok wraps a value", () => {
@@ -67,5 +67,22 @@ describe("result", () => {
       "details: code=ENOENT syscall=spawn path=missing-bin",
       "stderr: binary not found",
     ].join("\n"))
+  })
+
+  test("describes a failed dual-stack connect by its attempts", () => {
+    const refused = (address: string) => Object.assign(new Error(`connect ECONNREFUSED ${address}:443`), { code: "ECONNREFUSED" })
+    const cause = Object.assign(new AggregateError([refused("::1"), refused("127.0.0.1")]), { code: "ECONNREFUSED" })
+
+    assert.equal(describeError(cause), "connect ECONNREFUSED ::1:443; connect ECONNREFUSED 127.0.0.1:443")
+    assert.equal(formatError(appError("ProcessError", "probe failed", cause)), [
+      "probe failed",
+      "caused by: connect ECONNREFUSED ::1:443; connect ECONNREFUSED 127.0.0.1:443",
+      "details: code=ECONNREFUSED",
+    ].join("\n"))
+  })
+
+  test("describes an error without a message by its code", () => {
+    assert.equal(describeError(Object.assign(new Error(), { code: "ECONNRESET" })), "ECONNRESET")
+    assert.equal(describeError(new AggregateError([])), "AggregateError")
   })
 })

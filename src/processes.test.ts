@@ -251,18 +251,19 @@ describe("process lifecycle", () => {
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
     await fs.writeFile(path.join(root, ".env.local"), "WORKSPACE_VALUE=workspace\n")
 
-    const started = await startCommand(config, workspace, "web")
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, { ...process.env, PORTLESS_PORT: "1355" })
     assert.equal(started.ok, true)
+    assert.equal(started.ok && started.value.record.url, "https://web-feature-x-tilly.localhost:1355")
 
     const env = JSON.parse(await readSoon(output))
     assert.deepEqual(env, {
-      web: "https://web-feature-x-tilly.localhost",
-      sync: "https://sync-feature-x-tilly.localhost",
-      syncWs: "wss://sync-feature-x-tilly.localhost",
+      web: "https://web-feature-x-tilly.localhost:1355",
+      sync: "https://sync-feature-x-tilly.localhost:1355",
+      syncWs: "wss://sync-feature-x-tilly.localhost:1355",
       workspaceValue: "command",
       urls: JSON.stringify({
-        web: "https://web-feature-x-tilly.localhost",
-        sync: "https://sync-feature-x-tilly.localhost",
+        web: "https://web-feature-x-tilly.localhost:1355",
+        sync: "https://sync-feature-x-tilly.localhost:1355",
       }),
     })
 

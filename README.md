@@ -46,9 +46,15 @@ work down feature-x          # tear it all down
 Routed commands get a stable URL of the form:
 
 ```
-{command}-{workspace}-{project}.localhost
-# e.g. web-feature-x-tilly.localhost, sync-feature-x-tilly.localhost
+https://{command}-{workspace}-{project}.localhost[:port]
+# e.g. https://web-feature-x-tilly.localhost, https://sync-feature-x-tilly.localhost
 ```
+
+The port is the one Portless listens on, left out when it is 443 (Portless on
+`:1355` gives `https://web-feature-x-tilly.localhost:1355`). A name longer than
+63 characters is shortened exactly like Portless shortens it, so the printed URL
+is always the host Portless serves. Commands get these URLs as `WORK_URL` and
+`WORK_<ID>_URL`; use those rather than building URLs by hand.
 
 Logs and state live as plain files in `~/.work-cli/` so you can `cat`, `tail`, `jq` them.
 
@@ -209,7 +215,7 @@ export default {
       route: true,
     },
     web: {
-      run: 'PUBLIC_JAZZ_SYNC_SERVER="wss://sync-${WORK_WORKSPACE}-tilly.localhost" astro dev --port "$PORT" --host "$HOST"',
+      run: 'PUBLIC_JAZZ_SYNC_SERVER="$WORK_SYNC_WS_URL" astro dev --port "$PORT" --host "$HOST"',
       autoStart: true,
       route: true,
     },
@@ -291,9 +297,8 @@ Day in the life:
 # Spin it up — creates ../tilly.worktrees/chat-streaming, runs setup, starts both servers.
 work up chat-streaming --create
 
-# Wait until the web app answers, then open it. Sync server is already wired up via the env var.
-work wait chat-streaming web
-open https://web-chat-streaming-tilly.localhost
+# Wait until the web app answers, then open the URL it prints. Sync server is already wired up via the env var.
+open "$(work wait chat-streaming web)"
 
 # Meanwhile, the agent is grinding for 30 minutes. Start the next worktree in parallel.
 work up image-uploads --create
