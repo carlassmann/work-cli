@@ -301,8 +301,14 @@ work owns:
   logs/state
   consistent route names
 
-For routed commands, work checks that portless exists, then starts:
+For routed commands, work checks that portless exists and its proxy answers, then starts:
   portless {command}-{workspace}-{project} sh -lc "{run}"
+
+Proxy down:
+  work up/run/restart start nothing and print the command that starts the proxy:
+    portless proxy start -p 1355 --https
+  portless forgets its port when the proxy stops, so work names the port it last
+  saw the proxy answer on. work never starts the proxy itself.
 
 Example:
   portless web-feature-x-tilly sh -lc "bun run dev"

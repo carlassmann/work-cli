@@ -116,6 +116,7 @@ Behavior:
   work up feature-x --create   Create without asking when missing.
   work up feature-x --create   Use local branch, else track a unique remote branch, else branch from HEAD.
   work up feature-x --create   Run worktrees.setup after create.
+  work up                      Start nothing routed while the portless proxy is down; print how to start it.
 
 Examples:
   work up
@@ -247,6 +248,9 @@ Workspace or command:
   that is both is read as the workspace; pass -w to name the workspace instead.
   Outside a project the same rule uses tracked state.
 
+Behavior:
+  If a routed command needs the portless proxy and it is down, work prints how to start it and restarts nothing.
+
 Examples:
   work restart web
   work restart web api
@@ -274,6 +278,7 @@ Options:
 Behavior:
   If the command is already alive, work prints "already up".
   If route is enabled, work starts it through portless.
+  If route is enabled and the portless proxy is down, work prints how to start it and starts nothing.
 
 Examples:
   work run web

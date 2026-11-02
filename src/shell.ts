@@ -93,8 +93,8 @@ async function psValue(pid: number, field: string, environment: NodeJS.ProcessEn
   return null
 }
 
-export function resolveHome(file: string) {
-  if (file === "~") return os.homedir()
-  if (file.startsWith("~/")) return path.join(os.homedir(), file.slice(2))
+export function resolveHome(file: string, home = os.homedir()) {
+  if (file === "~") return home
+  if (file.startsWith("~/")) return path.join(home, file.slice(2))
   return path.resolve(file)
 }
