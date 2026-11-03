@@ -3,7 +3,9 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { commandExists, existsAt } from "./shell.js"
 
-const WORKD_UNIT_PREFIX = "work-workd-"
+const WORK_UNIT_PREFIX = "work-"
+const WORKD_UNIT_PREFIX = `${WORK_UNIT_PREFIX}workd-`
+const PROXY_UNIT_PREFIX = `${WORK_UNIT_PREFIX}portless-`
 
 type Entrypoint = { command: string; args: Array<string> }
 
@@ -16,10 +18,23 @@ export type DaemonLaunch = Entrypoint & { unit: string | null }
 export function daemonLaunchPlan(entrypoint: Entrypoint, options: { systemd: boolean; stateRoot: string; now?: number }): DaemonLaunch {
   if (!options.systemd) return { ...entrypoint, unit: null }
 
-  const unit = workdUnitName(options.stateRoot, options.now)
+  return scopeLaunch(entrypoint, workdUnitName(options.stateRoot, options.now), `work daemon for ${options.stateRoot}`)
+}
+
+// The Portless proxy outlives the work command that starts it, so it gets its own scope
+// for the same reason workd does: in the caller's scope it dies with the agent thread or
+// terminal that happened to start it, and takes every routed URL down with it.
+export function proxyLaunchPlan(entrypoint: Entrypoint, options: { systemd: boolean; now?: number }): DaemonLaunch {
+  if (!options.systemd) return { ...entrypoint, unit: null }
+  return scopeLaunch(entrypoint, `${PROXY_UNIT_PREFIX}${(options.now ?? Date.now()).toString(36)}`, "Portless proxy started by work")
+}
+
+// systemd-run --scope moves the command into a new scope and then execs it; whatever it
+// forks or daemonizes stays in that scope after systemd-run returns.
+function scopeLaunch(entrypoint: Entrypoint, unit: string, description: string): DaemonLaunch {
   return {
     command: "systemd-run",
-    args: ["--user", "--scope", "--collect", "--quiet", `--unit=${unit}`, `--description=work daemon for ${options.stateRoot}`, "--", entrypoint.command, ...entrypoint.args],
+    args: ["--user", "--scope", "--collect", "--quiet", `--unit=${unit}`, `--description=${description}`, "--", entrypoint.command, ...entrypoint.args],
     unit: `${unit}.scope`,
   }
 }
@@ -54,8 +69,8 @@ export function cgroupUnit(cgroup: string) {
   return unit || null
 }
 
-// Scopes other than workd's own belong to a terminal, IDE or agent session and are
-// stopped, with everything inside, when that session ends.
+// Scopes other than the ones work creates belong to a terminal, IDE or agent session and
+// are stopped, with everything inside, when that session ends.
 export function sessionScope(unit: string | null) {
-  return unit !== null && unit.endsWith(".scope") && !unit.startsWith(WORKD_UNIT_PREFIX)
+  return unit !== null && unit.endsWith(".scope") && !unit.startsWith(WORK_UNIT_PREFIX)
 }

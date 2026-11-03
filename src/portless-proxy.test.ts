@@ -192,20 +192,69 @@ describe("proxyRemedy", () => {
 describe("ensurePortlessProxy", () => {
   const noService = async () => false
 
-  test("refuses routed commands while the proxy is stopped and names the exact start command", async () => {
-    const result = await ensurePortlessProxy([{ id: "web", port: 1355, environment: {} }, { id: "api", port: 1355, environment: {} }], async () => ({ state: "stopped", port: 1355 }), noService)
+  test("starts a stopped unprivileged proxy itself and lets the commands start once it answers", async () => {
+    const starts: Array<[number, boolean]> = []
+    let running = false
+    const result = await ensurePortlessProxy(
+      [{ id: "web", port: 1355, environment: {} }, { id: "api", port: 1355, environment: {} }],
+      async () => ({ state: running ? "ok" : "stopped", port: 1355 }),
+      noService,
+      async (port, tls) => {
+        starts.push([port, tls])
+        running = true
+        return { ok: true, value: undefined }
+      },
+    )
+    assert.equal(result.ok, true)
+    assert.deepEqual(starts, [[1355, true]])
+  })
+
+  test("refuses routed commands and names the exact start command when its own start fails", async () => {
+    const result = await ensurePortlessProxy(
+      [{ id: "web", port: 1355, environment: {} }, { id: "api", port: 1355, environment: {} }],
+      async () => ({ state: "stopped", port: 1355 }),
+      noService,
+      async () => ({ ok: false, error: { tag: "PortlessError", message: "portless exited 1" } }),
+    )
     assert.equal(result.ok, false)
     if (result.ok) return
     assert.equal(result.error.tag, "PortlessError")
     assert.equal(result.error.message, [
-      "the Portless proxy is not running on :1355, and routed commands need it (web, api). Start it, then retry:",
+      "the Portless proxy is not running on :1355, and routed commands need it (web, api). work could not start it: portless exited 1",
+      "Start it, then retry:",
       "  portless proxy start -p 1355 --https",
     ].join("\n"))
   })
 
+  test("gives up on a started proxy that never answers", async () => {
+    const result = await ensurePortlessProxy(
+      [{ id: "web", port: 1355, environment: {} }],
+      async () => ({ state: "stopped", port: 1355 }),
+      noService,
+      async () => ({ ok: true, value: undefined }),
+      0,
+    )
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.match(result.error.message, /work could not start it: it did not answer on :1355 within 0s/)
+  })
+
+  test("leaves a proxy that needs sudo or its startup service to the user", async () => {
+    const result = await ensurePortlessProxy(
+      [{ id: "web", port: 443, environment: {} }],
+      async () => ({ state: "stopped", port: 443 }),
+      noService,
+      async () => assert.fail("started"),
+    )
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.match(result.error.message, /sudo portless proxy start -p 443 --https/)
+  })
+
   test("lets commands start when the proxy answers or another proxy owns the port", async () => {
-    assert.equal((await ensurePortlessProxy([{ id: "web", port: 1355, environment: {} }], async () => ({ state: "ok", port: 1355 }), noService)).ok, true)
-    assert.equal((await ensurePortlessProxy([{ id: "web", port: 443, environment: {} }], async () => ({ state: "foreign", port: 443 }), noService)).ok, true)
+    const noStart = async () => assert.fail("started")
+    assert.equal((await ensurePortlessProxy([{ id: "web", port: 1355, environment: {} }], async () => ({ state: "ok", port: 1355 }), noService, noStart)).ok, true)
+    assert.equal((await ensurePortlessProxy([{ id: "web", port: 443, environment: {} }], async () => ({ state: "foreign", port: 443 }), noService, noStart)).ok, true)
   })
 
   test("does not probe without routed commands", async () => {
@@ -226,13 +275,14 @@ describe("ensurePortlessProxy", () => {
       { id: "web", port: 1355, environment },
       { id: "api", port: 8443, environment },
       { id: "docs", port: 1355, environment },
-    ], probe, noService)
+    ], probe, noService, async () => ({ ok: false, error: { tag: "PortlessError", message: "portless exited 1" } }))
 
     assert.deepEqual(probed, [1355, 8443])
     assert.equal(result.ok, false)
     if (result.ok) return
     assert.equal(result.error.message, [
-      "the Portless proxy is not running on :8443, and routed commands need it (api). Start it, then retry:",
+      "the Portless proxy is not running on :8443, and routed commands need it (api). work could not start it: portless exited 1",
+      "Start it, then retry:",
       "  portless proxy start -p 8443 --https",
     ].join("\n"))
   })
