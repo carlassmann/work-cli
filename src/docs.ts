@@ -312,10 +312,13 @@ For routed commands, work checks that portless exists and its proxy answers, the
   portless {command}-{workspace}-{project} sh -lc "{run}"
 
 Proxy down:
-  work up/run/restart start nothing and print the command that starts the proxy:
+  On an unprivileged port, work up/run/restart start the proxy themselves:
     portless proxy start -p 1355 --https
-  portless forgets its port when the proxy stops, so work names the port it last
-  saw the proxy answer on. work never starts the proxy itself.
+  on the port work last saw it answer on (portless forgets its port when the
+  proxy stops). On Linux with a systemd user manager it runs in its own
+  work-portless-* scope, so it does not die with the terminal or agent thread
+  that ran work. If that start fails, or the proxy needs sudo (:443) or runs as
+  a startup service, they start nothing and print the command to run instead.
 
 Example:
   portless web-feature-x-tilly sh -lc "bun run dev"

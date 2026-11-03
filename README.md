@@ -71,7 +71,7 @@ bun link
 ```
 
 Optional but recommended: install [`portless`][portless] (for `route: true` commands). Verify with `work doctor`.
-When its proxy is down, `work up`, `run` and `restart` start no routed command and print the exact command that starts it, such as `portless proxy start -p 1355 --https`.
+When its proxy is down on an unprivileged port, `work up`, `run` and `restart` start it with `portless proxy start -p 1355 --https`. On Linux it runs in its own `work-portless-*` systemd scope, so it outlives the terminal or agent thread that started it. When that start fails, or the proxy needs sudo or its startup service, they start no routed command and print the exact command to run.
 
 Shell integration (completion + `work cd`) — add to `~/.zshrc` or `~/.bashrc`:
 

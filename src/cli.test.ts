@@ -1299,6 +1299,7 @@ async function fakePortlessBin() {
   const bin = await tempDir("work-cli-bin-")
   await writeFile(path.join(bin, "portless"), `#!/bin/sh
 [ "$1" = "service" ] && exit 0
+[ "$1" = "proxy" ] && { echo "fake portless cannot start a proxy"; exit 1; }
 while [ "$#" -gt 0 ] && [ "$1" != "sh" ]; do shift; done
 exec "$@"
 `)

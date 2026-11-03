@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { cgroupUnit, daemonLaunchPlan, sessionScope, systemdUserManagerAvailable, workdUnitName } from "./systemd.js"
+import { cgroupUnit, daemonLaunchPlan, proxyLaunchPlan, sessionScope, systemdUserManagerAvailable, workdUnitName } from "./systemd.js"
 import { tempDir } from "./test-helpers.js"
 
 const entrypoint = { command: "/usr/bin/node", args: ["/opt/work/dist/workd.js"] }
@@ -57,5 +57,16 @@ test("warns about session scopes but not about workd's own scope or services", (
   assert.equal(sessionScope("app-foot-1234.scope"), true)
   assert.equal(sessionScope(`${workdUnitName("/home/me/.work-cli")}.scope`), false)
   assert.equal(sessionScope("work-tests.service"), false)
+  assert.equal(sessionScope(proxyLaunchPlan(entrypoint, { systemd: true }).unit), false)
   assert.equal(sessionScope(null), false)
+})
+
+test("the Portless proxy gets a scope of its own so it outlives the caller", () => {
+  const proxy = { command: "portless", args: ["proxy", "start", "-p", "1355", "--https"] }
+  assert.deepEqual(proxyLaunchPlan(proxy, { systemd: false }), { ...proxy, unit: null })
+  assert.deepEqual(proxyLaunchPlan(proxy, { systemd: true, now: 1_700_000_000_000 }), {
+    command: "systemd-run",
+    args: ["--user", "--scope", "--collect", "--quiet", "--unit=work-portless-loyw3v28", "--description=Portless proxy started by work", "--", "portless", "proxy", "start", "-p", "1355", "--https"],
+    unit: "work-portless-loyw3v28.scope",
+  })
 })

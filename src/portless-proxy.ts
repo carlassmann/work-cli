@@ -3,13 +3,14 @@ import http from "node:http"
 import https from "node:https"
 import os from "node:os"
 import path from "node:path"
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { childEnvironment } from "./environment.js"
 import { errResult, ok } from "./result.js"
 import type { Result } from "./result.js"
 import { existsAt, resolveHome } from "./shell.js"
 import { stateRoot } from "./state.js"
+import { proxyLaunchPlan, systemdUserManagerAvailable } from "./systemd.js"
 
 const exec = promisify(execFile)
 
@@ -178,13 +179,21 @@ function proxyRemedySteps(remedy: ProxyRemedy) {
 // A routed command, the Portless port its URL was built for, and the environment it is spawned with.
 export type RoutedCommand = { id: string; port: number; environment: NodeJS.ProcessEnv }
 
-// Refuses to start routed commands while nothing listens on their Portless port: each one
-// would launch Portless, fail to reach or start the proxy, and die right away. Every
-// distinct endpoint is probed once.
+export type ProxyStarter = (port: number, tls: boolean, environment: NodeJS.ProcessEnv) => Promise<Result<void>>
+
+const PROXY_START_TIMEOUT_MS = 30_000
+const PROXY_READY_TIMEOUT_MS = 10_000
+
+// Starts routed commands only once their Portless proxy answers. A stopped proxy that
+// needs no sudo is started by work in a scope of its own (see proxyLaunchPlan), so it
+// does not die with whichever agent thread or terminal ran this work command. Every
+// distinct endpoint is probed once; a proxy work cannot start leaves every command as it was.
 export async function ensurePortlessProxy(
   routed: Array<RoutedCommand>,
   probe: typeof probePortless = probePortless,
   serviceInstalled?: (environment: NodeJS.ProcessEnv) => Promise<boolean>,
+  start: ProxyStarter = startPortlessProxy,
+  readyTimeoutMs = PROXY_READY_TIMEOUT_MS,
 ): Promise<Result<void>> {
   const endpoints = new Map<string, Array<RoutedCommand>>()
   for (const command of routed) {
@@ -198,10 +207,78 @@ export async function ensurePortlessProxy(
     const proxy = await probe(environment, port)
     if (proxy.state !== "stopped") continue
     const remedy = await portlessProxyRemedy(environment, proxy.port, serviceInstalled)
-    stopped.push(`the Portless proxy is not running on :${proxy.port}, and routed commands need it (${commands.map((command) => command.id).join(", ")}). ${proxyRemedySteps(remedy)}`)
+    const needs = `routed commands need it (${commands.map((command) => command.id).join(", ")})`
+    if (remedy.kind !== "start") {
+      stopped.push(`the Portless proxy is not running on :${proxy.port}, and ${needs}. ${proxyRemedySteps(remedy)}`)
+      continue
+    }
+    const tls = (await lastSeenProxy(portlessStateDir(environment)))?.tls ?? true
+    const started = await start(proxy.port, tls, environment)
+    const failure = started.ok ? await waitForProxy(probe, environment, proxy.port, readyTimeoutMs) : started.error.message
+    if (failure) stopped.push(`the Portless proxy is not running on :${proxy.port}, and ${needs}. work could not start it: ${failure}\n${proxyRemedySteps(remedy)}`)
   }
 
   return stopped.length === 0 ? ok(undefined) : errResult("PortlessError", stopped.join("\n"))
+}
+
+async function waitForProxy(probe: typeof probePortless, environment: NodeJS.ProcessEnv, port: number, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const { state } = await probe(environment, port)
+    if (state === "ok") return null
+    if (state === "foreign") return `another proxy took :${port}`
+    if (Date.now() >= deadline) return `it did not answer on :${port} within ${Math.round(timeoutMs / 1_000)}s`
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+// `portless proxy start` daemonizes and returns. Its output goes to a file rather than a
+// pipe: the daemon would inherit a pipe and hold it open for as long as it runs.
+async function startPortlessProxy(port: number, tls: boolean, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+  const entrypoint = { command: "portless", args: ["proxy", "start", "-p", String(port), tls ? "--https" : "--no-tls"] }
+  const plan = proxyLaunchPlan(entrypoint, { systemd: await systemdUserManagerAvailable(environment) })
+  let outcome = await runProxyStart(plan, environment)
+  // systemd-run fails before it execs Portless when it cannot reach the user manager.
+  if (!outcome.ok && plan.unit !== null) outcome = await runProxyStart(entrypoint, environment)
+  return outcome
+}
+
+async function runProxyStart(launch: { command: string; args: Array<string> }, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+  try {
+    await fs.mkdir(stateRoot(), { recursive: true, mode: 0o700 })
+  } catch {}
+  const logFile = path.join(stateRoot(), "portless-proxy-start.log")
+  let log: fs.FileHandle
+  try {
+    log = await fs.open(logFile, "w")
+  } catch (cause) {
+    return errResult("PortlessError", `cannot write ${logFile}`, cause)
+  }
+  try {
+    const exit = await new Promise<{ code: number | null; error?: Error }>((resolve) => {
+      const child = spawn(launch.command, launch.args, {
+        env: childEnvironment(environment),
+        stdio: ["ignore", log.fd, log.fd],
+        detached: true,
+      })
+      const deadline = setTimeout(() => child.kill("SIGKILL"), PROXY_START_TIMEOUT_MS)
+      child.once("error", (error) => {
+        clearTimeout(deadline)
+        resolve({ code: null, error })
+      })
+      child.once("exit", (code) => {
+        clearTimeout(deadline)
+        resolve({ code })
+      })
+      child.unref()
+    })
+    if (exit.code === 0) return ok(undefined)
+    const output = (await fs.readFile(logFile, "utf8").catch(() => "")).trim().split("\n").slice(-5).join("\n")
+    const detail = exit.error?.message ?? `${[launch.command, ...launch.args].join(" ")} exited ${exit.code ?? "on a signal"}`
+    return errResult("PortlessError", output ? `${detail}:\n${output}` : detail)
+  } finally {
+    await log.close()
+  }
 }
 
 // Domains the running Portless serves next to its app names. Portless 0.15.1 records
