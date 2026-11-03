@@ -85,6 +85,7 @@ export type WorkspaceState = WorkspaceRecord & {
   env?: Record<string, string>
   exposure?: Exposure
   urls?: Record<string, string>
+  worktreeFingerprint?: string
 }
 
 export const DAEMON_PROTOCOL_VERSION = 11

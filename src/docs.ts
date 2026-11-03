@@ -49,7 +49,7 @@ Example:
 
 Workspace fields:
   env                 environment inherited by setup and every command
-  maxTtlSeconds       maximum command lifetime in seconds, 0 disables
+  maxTtlSeconds       seconds without worktree changes before commands stop, 0 disables
 
 Global defaults: ~/.config/work/config.json, or $XDG_CONFIG_HOME/work/config.json.
 Example: { "maxTtlSeconds": 3600 }
@@ -57,7 +57,11 @@ TTL precedence: WORK_MAX_TTL_SECONDS from the invoking shell, project maxTtlSeco
 global maxTtlSeconds, then unlimited. 0 disables TTL at any level.
 Set the project value in the main worktree's work.config.js for all its workspaces.
 Values must be finite and non-negative.
-TTL is captured when a command starts. Automatic restarts preserve its deadline;
+TTL is idle time: any change in the worktree (an edit, a new or deleted file, a commit,
+a checkout) restarts the window for every timed command in that workspace. Gitignored
+files do not count. workd looks for changes once a minute and right before a command
+would expire. Outside a git worktree, TTL counts from the start instead.
+TTL is captured when a command starts. Automatic restarts preserve its window;
 explicit restarts reset it and re-read env and global defaults. Tracked restarts
 use the stored project setting. Changing defaults leaves running commands unchanged.
 workd checks every second and stops expired commands
@@ -209,8 +213,8 @@ Restart policy:
   restart: "manual"    do not restart after exit
   restart: "on-exit"   daemon restarts after process exits
 
-maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS limits command lifetime. Expired commands
-stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
+maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS stops commands after that long without
+worktree changes. Expired commands stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
 Prune preserves records for supervised commands so their deadlines remain intact.
 
 Dead records:

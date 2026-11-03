@@ -255,6 +255,12 @@ override the global default for that project's workspaces. Use
 shell. Precedence is env, project config, global config, then unlimited.
 Values must be finite, non-negative seconds; `0` disables TTL at any level.
 
+TTL counts idle time, not lifetime: commands stop once the worktree has gone
+`maxTtlSeconds` without a change. Any edit, new or deleted file, commit, or checkout
+restarts the window for every timed command in that workspace; gitignored files
+don't count. The daemon looks for changes once a minute and again right before a
+command would expire. Outside a git worktree, TTL counts from when the command started.
+
 The daemon captures TTL when each command starts and checks expiry every second.
 Automatic restarts and daemon restarts preserve the deadline. Explicit restarts
 reset it and read the current env and global default. Restarts from tracked state
