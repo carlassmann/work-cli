@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { cronRenewsWithAcme, launchAgentPlist } from "./certificate-renewal.js"
+import { cronRenewsWithAcme, launchAgentPlist, systemdRenewalUnits } from "./certificate-renewal.js"
 import { runWithTimeout } from "./tailscale-setup.js"
 import { tempDir } from "./test-helpers.js"
 
@@ -44,4 +44,13 @@ test("a timeout stops descendants that keep the output open, and fails the run",
   assert.equal(result.code, -1)
   assert.match(result.output, /did not finish/)
   assert.ok(performance.now() - startedAt < 5_000)
+})
+
+test("systemd units run acme.sh --cron daily with custom locations, quoted", () => {
+  const { service, timer } = systemdRenewalUnits("/home/me/.acme.sh/acme.sh", "/home/me/my acme", { CERT_HOME: "/srv/certs" })
+  assert.match(service, /^ExecStart="\/home\/me\/\.acme\.sh\/acme\.sh" --cron --home "\/home\/me\/my acme"$/m)
+  assert.match(service, /^Environment="CERT_HOME=\/srv\/certs"$/m)
+  assert.match(timer, /^OnCalendar=\*-\*-\* 04:17$/m)
+  assert.match(timer, /^Persistent=true$/m)
+  assert.match(timer, /^WantedBy=timers\.target$/m)
 })

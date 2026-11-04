@@ -12,7 +12,7 @@ import { childEnvironment } from "./environment.js"
 import { errResult, ok } from "./result.js"
 import { portlessPort, portlessServiceCustomization, portlessTlds } from "./portless-proxy.js"
 import { commandExists } from "./shell.js"
-import { certificatePaths, isPreviewDomain, savedTailscaleDomain, tailscaleExposure } from "./tailscale.js"
+import { DEFAULT_SERVE_PORT, certificatePaths, isPreviewDomain, ownProxyTarget, parseServeTarget, savedTailscaleDomain, savedTailscaleServePort, tailscaleExposure } from "./tailscale.js"
 import type { Result } from "./result.js"
 
 const exec = promisify(execFile)
@@ -31,6 +31,9 @@ type SetupPrompts = {
 
 type SetupOptions = {
   domain?: string | undefined
+  servePort?: number | undefined
+  // true/false sets whether plain work up uses tailnet URLs; undefined keeps the saved choice.
+  byDefault?: boolean | undefined
   environment: NodeJS.ProcessEnv
   prompts: SetupPrompts
   log: (line: string) => void
@@ -51,6 +54,14 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
   if (!domain) return errResult("CLIError", "no domain given. Pass --domain dev.example.com")
   if (!isPreviewDomain(domain)) return errResult("CLIError", `not a usable domain: ${domain}`)
   if (!options.domain && savedDomain) log(`Using the saved domain ${domain}. Pass --domain to change it.`)
+
+  const servePort = options.servePort ?? savedTailscaleServePort(saved.value) ?? DEFAULT_SERVE_PORT
+  const serveBusy = await serveBlocker(servePort, environment)
+  if (serveBusy) {
+    log(`• Tailnet port ${servePort}: tailscale serve already sends it to ${serveBusy}, so work cannot use it.`)
+    log(`  Pick a free port with --serve-port <port>, or remove that handler with: tailscale serve --tcp=${servePort} off`)
+    return errResult("ConfigError", `tailnet port ${servePort} is taken`)
+  }
 
   const paths = certificatePaths(domain, environment)
   const dnsReady = await wildcardResolvesTo(domain, ip.value)
@@ -86,21 +97,38 @@ export async function runTailscaleSetup(options: SetupOptions): Promise<Result<v
     if (acme) log(renewalLine(await scheduleRenewal(acme, environment, (args) => runWithTimeout(acme, args, childEnvironment(environment), ACME_TIMEOUT_MS))))
   }
 
-  await serveDomainOnThisMachine(domain, options)
+  await serveDomainOnThisMachine(domain, ip.value, options)
 
-  const stored = await updateGlobalConfig({ tailscale: { domain } }, environment)
+  const savedTailscale = saved.value["tailscale"] && typeof saved.value["tailscale"] === "object" ? saved.value["tailscale"] as Record<string, unknown> : {}
+  const byDefault = options.byDefault ?? savedTailscale["default"] === true
+  const { servePort: _oldServePort, default: _oldDefault, ...keep } = savedTailscale
+  const stored = await updateGlobalConfig({
+    tailscale: {
+      ...keep,
+      domain,
+      ...servePort === DEFAULT_SERVE_PORT ? {} : { servePort },
+      ...byDefault ? { default: true } : {},
+    },
+  }, environment)
   if (!stored.ok) return stored
 
+  const origin = `https://*.${domain}${servePort === DEFAULT_SERVE_PORT ? "" : `:${servePort}`}`
   log("")
-  log(`✓ Saved. Routed commands will use https://{command}-{workspace}-{project}.${domain}`)
+  log(`✓ Saved. Routed commands will use https://{command}-{workspace}-{project}.${domain}${servePort === DEFAULT_SERVE_PORT ? "" : `:${servePort}`}`)
   log("")
   log("If the app signs users in with OAuth (for example WorkOS), allow:")
-  log(`  redirect URI   https://*.${domain}/<callback path>`)
-  log(`  web origin     https://*.${domain}`)
+  log(`  redirect URI   ${origin}/<callback path>`)
+  log(`  web origin     ${origin}`)
   log("")
-  log("Then, in a project:")
-  log("  work setup --tailscale     # if your setup hook writes URLs into config")
-  log("  work up --tailscale")
+  if (byDefault) {
+    log("work up uses these URLs by default on this machine (--no-default turns that off). Restart a running")
+    log("workspace with work down && work up to switch it.")
+  } else {
+    log("Then, in a project:")
+    log("  work setup --tailscale     # if your setup hook writes URLs into config")
+    log("  work up --tailscale")
+    log("Or make it the default on this machine: work tailscale setup --default")
+  }
   return ok(undefined)
 }
 
@@ -319,12 +347,17 @@ function renewalLine(renewal: Result<string>) {
   return renewal.ok ? `✓ Renewal: ${renewal.value}` : `• Renewal: not scheduled. ${renewal.error.message}\n  Run work tailscale setup again to retry.`
 }
 
-// *.<domain> resolves to this machine's tailnet address, and tailscale serve answers only
-// other devices, so this machine's own browser would land on a 404. Portless 0.15.1 serves
-// extra domains given as --tld and maps their names to 127.0.0.1 in /etc/hosts, which makes
-// the same URLs open here too.
-async function serveDomainOnThisMachine(domain: string, options: SetupOptions) {
+// *.<domain> resolves to this machine's tailnet address. On Linux, tailscaled puts that
+// address on a local interface, so tailscale serve answers this machine too. Elsewhere it
+// answers only other devices, so this machine's own browser would land on a 404. Portless
+// 0.15.1 serves extra domains given as --tld and maps their names to 127.0.0.1 in
+// /etc/hosts, which makes the same URLs open here too.
+async function serveDomainOnThisMachine(domain: string, ip: string, options: SetupOptions) {
   const { environment, prompts, log } = options
+  if (tailnetAddressIsLocal(ip)) {
+    log("✓ This machine: its tailnet address is local, so the URLs open here as well.")
+    return
+  }
   if (!await commandExists("portless", environment)) return
   const tlds = await portlessTlds(environment)
   const port = await portlessPort(environment)
@@ -338,7 +371,7 @@ async function serveDomainOnThisMachine(domain: string, options: SetupOptions) {
 
   log(`• This machine: *.${domain} points to its tailnet address, which only other devices reach.`)
   if (plan.state === "port") {
-    log(`  Portless listens on :${port}, but the URLs use :443, so they open only on other devices. Use the *.localhost URLs here.`)
+    log(`  Portless listens on :${port}, not :443, so these URLs open only on other devices. Use the *.localhost URLs here.`)
     return
   }
   if (plan.state === "outdated") {
@@ -466,12 +499,31 @@ export async function tailscaleDoctorLine(environment: NodeJS.ProcessEnv): Promi
   if (!ip.ok) return `tailscale\tmissing\t${ip.error.message}`
   if (!await wildcardResolvesTo(domain, ip.value)) return `tailscale\tdns\t*.${domain} does not point to ${ip.value}. Run: work tailscale setup`
   if (certificate.daysLeft <= 14) return `tailscale\texpiring\tcertificate expires in ${certificate.daysLeft} days. Run: work tailscale setup`
-  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)${await localAccessNote(domain, environment)}`
+  return `tailscale\tok\t${domain} (certificate ${certificate.daysLeft} days)${await localAccessNote(domain, ip.value, environment)}`
 }
 
-async function localAccessNote(domain: string, environment: NodeJS.ProcessEnv) {
+async function localAccessNote(domain: string, ip: string, environment: NodeJS.ProcessEnv) {
+  if (tailnetAddressIsLocal(ip)) return ""
   const port = await portlessPort(environment)
   if (port !== 443) return `; this machine opens the URLs only through *.localhost, because Portless listens on :${port}`
   if (!(await portlessTlds(environment)).includes(domain)) return `; this machine opens the URLs only after work tailscale setup lets Portless serve ${domain}`
   return ""
+}
+
+function tailnetAddressIsLocal(ip: string) {
+  if (process.platform !== "linux") return false
+  return Object.values(os.networkInterfaces()).some((addresses) => addresses?.some((address) => address.address === ip))
+}
+
+// The serve port is free when nothing serves it or work's own proxy already does.
+async function serveBlocker(servePort: number, environment: NodeJS.ProcessEnv): Promise<string | null> {
+  let output: string
+  try {
+    output = (await exec("tailscale", ["serve", "status", "--json"], { env: childEnvironment(environment), timeout: 30_000 })).stdout
+  } catch {
+    return null
+  }
+  const target = parseServeTarget(output, servePort)
+  const own = await ownProxyTarget()
+  return target && target !== own ? target : null
 }
