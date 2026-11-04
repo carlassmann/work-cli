@@ -20,6 +20,8 @@ type TailscaleExposure = Extract<Exposure, { mode: "tailscale" }>
 
 export type TailnetProxyConfig = {
   port: number
+  // Tailnet port that tailscale serve forwards to port. Missing in configs from older versions: 443.
+  servePort?: number
   certFile: string
   keyFile: string
   // Port of the Portless proxy that serves the local URLs.
@@ -30,7 +32,7 @@ export type TailnetProxyConfig = {
 
 const exec = promisify(execFile)
 const DEFAULT_PORT = 47443
-const SERVE_PORT = "443"
+export const DEFAULT_SERVE_PORT = 443
 const domainPattern = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$/
 
 // Settings come from WORK_TAILSCALE_* first, then from `work tailscale setup`,
@@ -40,6 +42,7 @@ export async function tailscaleExposure(environment: NodeJS.ProcessEnv = process
   if (!globalConfig.ok) return globalConfig
   const domain = (environment["WORK_TAILSCALE_DOMAIN"] ?? savedTailscaleDomain(globalConfig.value))?.trim().toLowerCase()
   const port = Number(environment["WORK_TAILSCALE_PORT"] ?? DEFAULT_PORT)
+  const servePort = Number(environment["WORK_TAILSCALE_SERVE_PORT"] ?? savedTailscaleServePort(globalConfig.value) ?? DEFAULT_SERVE_PORT)
 
   if (!isPreviewDomain(domain)) {
     return errResult("ConfigError", "no tailnet domain configured. Run: work tailscale setup")
@@ -51,12 +54,39 @@ export async function tailscaleExposure(environment: NodeJS.ProcessEnv = process
     return errResult("ConfigError", "WORK_TAILSCALE_PORT must be a free local port between 1024 and 65535.")
   }
 
-  return ok({ mode: "tailscale", domain, certFile, keyFile, port })
+  if (!isServePort(servePort)) {
+    return errResult("ConfigError", "WORK_TAILSCALE_SERVE_PORT must be a port between 1 and 65535.")
+  }
+
+  return ok({ mode: "tailscale", domain, certFile, keyFile, port, servePort })
 }
 
 export function savedTailscaleDomain(globalConfig: Record<string, unknown>) {
   const saved = globalConfig["tailscale"]
   return saved && typeof saved === "object" && "domain" in saved && typeof saved.domain === "string" ? saved.domain : undefined
+}
+
+export function savedTailscaleServePort(globalConfig: Record<string, unknown>) {
+  const saved = globalConfig["tailscale"]
+  return saved && typeof saved === "object" && "servePort" in saved && typeof saved.servePort === "number" ? saved.servePort : undefined
+}
+
+// WORK_TAILSCALE_DEFAULT=1/0 overrides what work tailscale setup --default saved.
+export async function tailscaleByDefault(environment: NodeJS.ProcessEnv = process.env) {
+  const override = environment["WORK_TAILSCALE_DEFAULT"]?.trim()
+  if (override) return override === "1" || override.toLowerCase() === "true"
+  const globalConfig = await readGlobalConfig(environment)
+  if (!globalConfig.ok) return false
+  const saved = globalConfig.value["tailscale"]
+  return Boolean(saved && typeof saved === "object" && "default" in saved && saved.default === true)
+}
+
+export function isServePort(port: number) {
+  return Number.isInteger(port) && port >= 1 && port <= 65535
+}
+
+function servePortOf(exposure: { servePort?: number | undefined }) {
+  return exposure.servePort ?? DEFAULT_SERVE_PORT
 }
 
 export function isPreviewDomain(domain: string | undefined): domain is string {
@@ -74,6 +104,13 @@ export function certificatePaths(domain: string, environment: NodeJS.ProcessEnv 
 export function tailscaleHostname(route: string, exposure: Exposure) {
   if (exposure.mode !== "tailscale") return null
   return `${dnsLabel(route)}.${exposure.domain}`
+}
+
+// Host and, unless it is 443, port of the tailnet URL.
+export function tailscaleHost(route: string, exposure: Exposure) {
+  if (exposure.mode !== "tailscale") return null
+  const servePort = servePortOf(exposure)
+  return `${tailscaleHostname(route, exposure)}${servePort === DEFAULT_SERVE_PORT ? "" : `:${servePort}`}`
 }
 
 let pendingSync: Promise<Result<void>> = Promise.resolve(ok(undefined))
@@ -94,8 +131,8 @@ async function runSync(environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   const exposures = records.map((record) => record.exposure).filter((exposure): exposure is TailscaleExposure => exposure?.mode === "tailscale")
   const exposure = exposures[0]
   if (!exposure) return errResult("ProcessError", "missing Tailscale exposure configuration")
-  if (exposures.some((other) => other.port !== exposure.port || other.certFile !== exposure.certFile || other.keyFile !== exposure.keyFile)) {
-    return errResult("ConfigError", "all active Tailscale commands on one machine must use the same WORK_TAILSCALE_PORT, WORK_TAILSCALE_CERT, and WORK_TAILSCALE_KEY.")
+  if (exposures.some((other) => other.port !== exposure.port || servePortOf(other) !== servePortOf(exposure) || other.certFile !== exposure.certFile || other.keyFile !== exposure.keyFile)) {
+    return errResult("ConfigError", "all active Tailscale commands on one machine must use the same WORK_TAILSCALE_PORT, WORK_TAILSCALE_SERVE_PORT, WORK_TAILSCALE_CERT, and WORK_TAILSCALE_KEY.")
   }
 
   for (const file of [exposure.certFile, exposure.keyFile]) {
@@ -112,6 +149,7 @@ async function runSync(environment: NodeJS.ProcessEnv): Promise<Result<void>> {
 
   const config: TailnetProxyConfig = {
     port: exposure.port,
+    servePort: servePortOf(exposure),
     certFile: exposure.certFile,
     keyFile: exposure.keyFile,
     portlessPort: await portlessPort(environment),
@@ -125,6 +163,11 @@ async function runSync(environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   const write = await writeConfig(config)
   if (!write.ok) return write
 
+  if (previous && servePortOf(previous) !== servePortOf(config)) {
+    const removed = await removeServe(previous.port, servePortOf(previous), environment)
+    if (!removed.ok) return removed
+  }
+
   let proxy = await proxyRecord(environment)
   if (proxy && previous?.port !== config.port) {
     await stopProxyPid(proxy.pid, environment)
@@ -135,7 +178,7 @@ async function runSync(environment: NodeJS.ProcessEnv): Promise<Result<void>> {
     if (!started.ok) return started
   }
 
-  return ensureServe(config.port, environment)
+  return ensureServe(config.port, servePortOf(config), environment)
 }
 
 // The proxy runs detached from workd, so workd calls this periodically to restart it if it died.
@@ -149,7 +192,7 @@ async function stopTailnetProxy(environment: NodeJS.ProcessEnv = process.env): P
   const proxy = await proxyRecord(environment)
   if (proxy) await stopProxyPid(proxy.pid, environment)
   if (config) {
-    const removed = await removeServe(config.port, environment)
+    const removed = await removeServe(config.port, servePortOf(config), environment)
     if (!removed.ok) return removed
   }
 
@@ -170,68 +213,69 @@ async function isActiveTailscaleRecord(record: CommandRecord) {
     && await isTrackedPidRunning(record.pid, record.startedAt)
 }
 
-// tailscale serve owns port 443 on the tailnet address, so work does not need root
-// to listen there. It forwards raw TCP, which keeps TLS and Host routing in the proxy.
-// Checked before anything stops or starts, so a held port 443 fails the command up front.
-export async function checkServePort(port: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+// tailscale serve owns the serve port (443 unless WORK_TAILSCALE_SERVE_PORT says otherwise) on
+// the tailnet address, so work does not need root to listen there. It forwards raw TCP, which
+// keeps TLS and Host routing in the proxy.
+// Checked before anything stops or starts, so a held serve port fails the command up front.
+export async function checkServePort(port: number, servePort: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   if (!await commandExists("tailscale", environment)) return ok(undefined)
   const status = await serveStatus(environment)
   if (!status.ok) return status
-  const holder = await serveHolder(status.value, port)
-  return holder === "foreign" ? errResult("ConfigError", serveConflictMessage(status.value, `127.0.0.1:${port}`)) : ok(undefined)
+  const holder = await serveHolder(status.value, port, servePort)
+  return holder === "foreign" ? errResult("ConfigError", serveConflictMessage(status.value, `127.0.0.1:${port}`, servePort)) : ok(undefined)
 }
 
 // A forward to a local port nobody listens on is left over from an earlier proxy (another
 // WORK_TAILSCALE_PORT or a crashed run); work takes it over and says so.
-async function serveHolder(output: string, port: number): Promise<"none" | "ours" | "stale" | "foreign"> {
-  const current = parseServeTarget(output)
+async function serveHolder(output: string, port: number, servePort: number): Promise<"none" | "ours" | "stale" | "foreign"> {
+  const current = parseServeTarget(output, servePort)
   if (!current) return "none"
   if (current === `127.0.0.1:${port}`) return "ours"
   const forwardPort = /^(?:127\.0\.0\.1|localhost):(\d+)$/.exec(current)?.[1]
   return forwardPort && !await isPortListening(Number(forwardPort)) ? "stale" : "foreign"
 }
 
-async function ensureServe(port: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+async function ensureServe(port: number, servePort: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   const status = await serveStatus(environment)
   if (!status.ok) return status
-  const current = parseServeTarget(status.value)
+  const current = parseServeTarget(status.value, servePort)
   const target = `127.0.0.1:${port}`
-  const holder = await serveHolder(status.value, port)
+  const holder = await serveHolder(status.value, port, servePort)
   if (holder === "ours") return ok(undefined)
-  if (holder === "foreign") return errResult("ConfigError", serveConflictMessage(status.value, target))
+  if (holder === "foreign") return errResult("ConfigError", serveConflictMessage(status.value, target, servePort))
   if (holder === "stale") {
-    console.error(`taking over tailnet port 443 from ${current}: nothing listens there`)
+    console.error(`taking over tailnet port ${servePort} from ${current}: nothing listens there`)
     try {
-      await exec("tailscale", ["serve", `--tcp=${SERVE_PORT}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
+      await exec("tailscale", ["serve", `--tcp=${servePort}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
     } catch (cause) {
       return errResult("ProcessError", `failed to remove the stale tailnet forward to ${current}: ${commandError(cause)}`)
     }
   }
 
   try {
-    await exec("tailscale", ["serve", "--bg", `--tcp=${SERVE_PORT}`, `tcp://${target}`], { env: childEnvironment(environment), timeout: 30_000 })
+    await exec("tailscale", ["serve", "--bg", `--tcp=${servePort}`, `tcp://${target}`], { env: childEnvironment(environment), timeout: 30_000 })
     return ok(undefined)
   } catch (cause) {
-    return errResult("ProcessError", `failed to forward tailnet port 443 to ${target}: ${commandError(cause)}`)
+    return errResult("ProcessError", `failed to forward tailnet port ${servePort} to ${target}: ${commandError(cause)}`)
   }
 }
 
-async function removeServe(port: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+async function removeServe(port: number, servePort: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
   if (!await commandExists("tailscale", environment)) return ok(undefined)
-  const current = await serveTarget(environment)
+  const current = await serveTarget(servePort, environment)
   if (!current.ok || current.value !== `127.0.0.1:${port}`) return ok(undefined)
 
   try {
-    await exec("tailscale", ["serve", `--tcp=${SERVE_PORT}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
+    await exec("tailscale", ["serve", `--tcp=${servePort}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
     return ok(undefined)
   } catch (cause) {
-    return errResult("ProcessError", `failed to remove the tailnet forward on port 443: ${commandError(cause)}`)
+    return errResult("ProcessError", `failed to remove the tailnet forward on port ${servePort}: ${commandError(cause)}`)
   }
 }
 
-async function serveTarget(environment: NodeJS.ProcessEnv): Promise<Result<string | null>> {
+async function serveTarget(servePort: number, environment: NodeJS.ProcessEnv): Promise<Result<string | null>> {
   const status = await serveStatus(environment)
-  return status.ok ? ok(parseServeTarget(status.value)) : status
+  return status.ok ? ok(parseServeTarget(status.value, servePort)) : status
 }
 
 async function serveStatus(environment: NodeJS.ProcessEnv): Promise<Result<string>> {
@@ -261,27 +305,29 @@ function acceptsConnections(host: string, port: number): Promise<boolean> {
   })
 }
 
-// Names the handler that holds port 443 and the exact commands to free it, since work needs raw TCP there.
-export function serveConflictMessage(output: string, target: string): string {
-  const current = parseServeTarget(output)
+// Names the handler that holds the serve port and the exact commands to free it, since work needs raw TCP there.
+export function serveConflictMessage(output: string, target: string, servePort = DEFAULT_SERVE_PORT): string {
+  const otherPort = servePort === 8443 ? 9443 : 8443
+  const pickAnother = `or pick another port for work with: work tailscale setup --serve-port <port>`
+  const current = parseServeTarget(output, servePort)
   if (current && current !== "another tailscale serve handler") {
-    return `tailscale serve already forwards tailnet port 443 to ${current}, which is in use, so work cannot point it at its proxy (${target}).\n` +
-      `If that forward is yours, move it to another port; otherwise free 443 with: tailscale serve --tcp=443 off\nThen rerun this command.`
+    return `tailscale serve already forwards tailnet port ${servePort} to ${current}, which is in use, so work cannot point it at its proxy (${target}).\n` +
+      `If that forward is yours, move it to another port; otherwise free ${servePort} with: tailscale serve --tcp=${servePort} off, ${pickAnother}\nThen rerun this command.`
   }
-  const handlers = webHandlers(output)
+  const handlers = webHandlers(output, servePort)
   const described = handlers.length > 0 ? handlers.map(({ path, proxy }) => `${path} -> ${proxy}`).join(", ") : "an HTTPS handler"
   const move = handlers.length > 0
-    ? handlers.map(({ path, proxy }) => `tailscale serve --bg --https=8443${path === "/" ? "" : ` --set-path=${path}`} ${proxy}`).join(" && ")
-    : "tailscale serve --bg --https=8443 <target>"
-  return `tailscale serve already uses tailnet port 443 for ${described}; work needs raw TCP on 443 for its proxy (${target}).\n` +
-    `Move that handler to port 8443: tailscale serve --https=443 off && ${move}\nThen rerun this command.`
+    ? handlers.map(({ path, proxy }) => `tailscale serve --bg --https=${otherPort}${path === "/" ? "" : ` --set-path=${path}`} ${proxy}`).join(" && ")
+    : `tailscale serve --bg --https=${otherPort} <target>`
+  return `tailscale serve already uses tailnet port ${servePort} for ${described}; work needs raw TCP on ${servePort} for its proxy (${target}).\n` +
+    `Move that handler to port ${otherPort}: tailscale serve --https=${servePort} off && ${move}, ${pickAnother}\nThen rerun this command.`
 }
 
-function webHandlers(output: string): Array<{ path: string; proxy: string }> {
+function webHandlers(output: string, servePort: number): Array<{ path: string; proxy: string }> {
   try {
     const web = (JSON.parse(output || "{}") as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: unknown; Path?: unknown; Text?: unknown }> }> }).Web ?? {}
     return Object.entries(web)
-      .filter(([host]) => host.endsWith(`:${SERVE_PORT}`))
+      .filter(([host]) => host.endsWith(`:${servePort}`))
       .flatMap(([, config]) => Object.entries(config.Handlers ?? {}))
       .map(([path, handler]) => ({ path, proxy: typeof handler.Proxy === "string" ? handler.Proxy : typeof handler.Path === "string" ? handler.Path : "a static handler" }))
   } catch {
@@ -289,7 +335,13 @@ function webHandlers(output: string): Array<{ path: string; proxy: string }> {
   }
 }
 
-export function parseServeTarget(output: string): string | null {
+// Where tailscale serve points when work's own proxy is running, or null.
+export async function ownProxyTarget() {
+  const config = await readConfig()
+  return config ? `127.0.0.1:${config.port}` : null
+}
+
+export function parseServeTarget(output: string, servePort = DEFAULT_SERVE_PORT): string | null {
   let status: unknown
   try {
     status = JSON.parse(output || "{}")
@@ -298,7 +350,7 @@ export function parseServeTarget(output: string): string | null {
   }
   if (!status || typeof status !== "object" || !("TCP" in status)) return null
   const handlers = status.TCP as Record<string, { TCPForward?: unknown; HTTPS?: unknown } | undefined>
-  const handler = handlers[SERVE_PORT]
+  const handler = handlers[String(servePort)]
   if (!handler) return null
   return typeof handler.TCPForward === "string" ? handler.TCPForward : "another tailscale serve handler"
 }
