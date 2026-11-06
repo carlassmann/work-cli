@@ -68,12 +68,14 @@ Deadlines survive daemon restarts. TTL requires a running daemon.
 Idle timeout precedence: WORK_IDLE_TIMEOUT_SECONDS, project idleTimeoutSeconds,
 global idleTimeoutSeconds, then disabled. Example global config for two hours:
   { "idleTimeoutSeconds": 7200, "maxTtlSeconds": 28800 }
-Same validation and capture/restart rules as TTL. Starts count as activity.
+Same validation and capture/restart rules as TTL. Explicit starts count as activity;
+automatic restarts preserve the idle clock.
 On Linux, workd samples backend TCP receive counters and new connections every 15s,
 including closing/TIME-WAIT sockets to catch short requests between samples.
-An open socket alone does not count. All routed commands must exceed their captured
-timeouts before workd stops every command in the workspace. No routed commands
-means no idle stop. Disabled or unobservable routed commands prevent idle stops.
+An open socket alone does not count. Received heartbeats and internal polling do.
+Fixed PORTLESS_APP_PORT and Portless appPort settings are honored.
+All routed commands must exceed their captured timeouts before workd stops every
+command in the workspace. No routed commands means no idle stop. Disabled or unobservable routed commands prevent idle stops.
 Activity timestamps and socket samples survive daemon restarts.
 Requires Linux and ss from iproute2; macOS and other platforms do not idle-stop.
 Sampling failures skip idle enforcement; TTL still applies. Traffic that opens and

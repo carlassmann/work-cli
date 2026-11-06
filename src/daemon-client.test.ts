@@ -52,6 +52,7 @@ describe("daemon client", () => {
       for (const record of Object.values(state.commands)) {
         record.startedAt = new Date(Date.now() - 120_000).toISOString()
         record.lastActivityAt = record.startedAt
+        record.activityStartedAt = record.startedAt
       }
       state.commands["web"]!.url = "http://idle.localhost"
       state.commands["web"]!.backendPort = 1

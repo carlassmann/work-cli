@@ -53,7 +53,7 @@ export function recordSocketActivity(command: CommandRecord, sockets: Record<str
 export function workspaceIdleSeconds(commands: Array<CommandRecord>, now: number): number | undefined {
   const routed = commands.filter((command) => command.url && !command.idleStoppedAt)
   if (routed.length === 0) return undefined
-  const newestStart = Math.max(...commands.filter((command) => !command.exitedAt).map((command) => Date.parse(command.startedAt)))
+  const newestStart = Math.max(...commands.filter((command) => !command.exitedAt).map((command) => Date.parse(command.activityStartedAt ?? command.startedAt)))
   if (!routed.every((command) => command.idleTimeoutSeconds && command.backendPort &&
     now - Math.max(newestStart, Date.parse(command.lastActivityAt ?? command.startedAt)) >= command.idleTimeoutSeconds * 1000)) return undefined
   return Math.floor(Math.min(...routed.map((command) =>

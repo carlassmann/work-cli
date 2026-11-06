@@ -75,6 +75,7 @@ export type CommandRecord = {
   idleTimeoutSeconds?: number
   maxTtlSeconds?: number
   ttlStartedAt?: string
+  activityStartedAt?: string
   lastActivityAt?: string
   idleSockets?: Record<string, number>
   idleStoppedAt?: string
@@ -94,7 +95,7 @@ export type WorkspaceState = WorkspaceRecord & {
   urls?: Record<string, string>
 }
 
-export const DAEMON_PROTOCOL_VERSION = 11
+export const DAEMON_PROTOCOL_VERSION = 12
 
 export type DaemonCommand =
   | {

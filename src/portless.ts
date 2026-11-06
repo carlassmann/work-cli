@@ -1,3 +1,5 @@
+import fs from "node:fs/promises"
+import path from "node:path"
 import { commandExists } from "./shell.js"
 import { cloudflareHostname } from "./cloudflare.js"
 import { tailscaleHostname } from "./tailscale.js"
@@ -111,6 +113,34 @@ function envName(id: string) {
 
 export function commandRoute(config: DevConfig, workspace: string, id: string, command: CommandConfig) {
   return usesPortless(command) ? portlessLabel(routeName(config.project, workspace, id, command.routeName)) : null
+}
+
+// Named Portless commands read appPort from their cwd, after PORTLESS_APP_PORT.
+export async function portlessAppPort(cwd: string, environment: NodeJS.ProcessEnv): Promise<Result<number | undefined>> {
+  const environmentPort = environment["PORTLESS_APP_PORT"]
+  if (environmentPort) {
+    return validateAppPort(/^\d+$/.test(environmentPort.trim()) ? Number(environmentPort) : NaN, "PORTLESS_APP_PORT")
+  }
+  try {
+    let config: { appPort?: unknown; apps?: unknown } | undefined
+    try {
+      config = JSON.parse(await fs.readFile(path.join(cwd, "portless.json"), "utf8"))
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
+      const pkg = JSON.parse(await fs.readFile(path.join(cwd, "package.json"), "utf8")) as { portless?: typeof config }
+      config = pkg.portless
+    }
+    return config && !config.apps && config.appPort !== undefined
+      ? validateAppPort(config.appPort, "Portless appPort") : ok(undefined)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return ok(undefined)
+    return errResult("ConfigError", `failed to read Portless app port in ${cwd}`, cause)
+  }
+}
+
+function validateAppPort(value: unknown, field: string): Result<number> {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535
+    ? ok(value) : errResult("ConfigError", `${field} must be an integer from 1 to 65535`)
 }
 
 export function commandProcess(run: string, route: string | null, backendPort?: number) {

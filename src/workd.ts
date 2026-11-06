@@ -324,7 +324,11 @@ async function expireIdleWorkspaces() {
       if (!current.ok || !current.value) return
       const state = current.value
       const routed = Object.values(state.commands).filter((record) => record.url && !record.idleStoppedAt)
-      if (routed.some((record) => !record.backendPort || !record.idleTimeoutSeconds)) return
+      if (routed.length === 0) return
+      if (routed.some((record) => !record.backendPort || !record.idleTimeoutSeconds)) {
+        debugLog("workd", `idle stop skipped for ${state.project}/${state.workspace}: routed command has no backend port or idle timeout`)
+        return
+      }
       let sample: Awaited<ReturnType<typeof sampleBackendSockets>>
       try {
         sample = await sampleBackendSockets(new Set(routed.map((record) => record.backendPort!)))
@@ -342,11 +346,11 @@ async function expireIdleWorkspaces() {
       }
       const idleSeconds = workspaceIdleSeconds(Object.values(state.commands), now)
       if (idleSeconds === undefined) return
-      for (const id of Object.keys(state.commands)) desired.delete(key(state.project, state.workspace, id))
       for (const [id, record] of Object.entries(state.commands)) {
         if (record.idleStoppedAt) continue
         const stopped = await stopCommand(state.project, state.workspace, id, { idleSeconds, syncExposures: false })
-        if (!stopped.ok) debugLog("workd", `idle stop ${state.project}/${state.workspace}/${id} failed: ${stopped.error.message}`)
+        if (stopped.ok) desired.delete(key(state.project, state.workspace, id))
+        else console.error(`workd: idle stop ${state.project}/${state.workspace}/${id} failed: ${stopped.error.message}`)
       }
       const synced = await syncExposures(process.env)
       if (!synced.ok) debugLog("workd", `idle exposure sync failed: ${synced.error.message}`)

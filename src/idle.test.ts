@@ -64,3 +64,12 @@ test("idle decision requires all routed commands, ignores workers, and starts th
   assert.equal(workspaceIdleSeconds([command({ idleStoppedAt: new Date(0).toISOString() })], 130_000), undefined)
   assert.equal(workspaceIdleSeconds([web, command({ url: null, startedAt: new Date(100_000).toISOString() })], 130_000), undefined)
 })
+
+test("automatic server and worker restarts do not extend the idle deadline", () => {
+  const activityStartedAt = new Date(0).toISOString()
+  const startedAt = new Date(119_000).toISOString()
+  const web = command({ startedAt, activityStartedAt, lastActivityAt: activityStartedAt })
+  const worker = command({ url: null, startedAt, activityStartedAt })
+  assert.equal(workspaceIdleSeconds([web, worker], 120_000), 120)
+  assert.equal(workspaceIdleSeconds([web, { ...worker, activityStartedAt: startedAt }], 120_000), undefined)
+})

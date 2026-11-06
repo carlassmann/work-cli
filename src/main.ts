@@ -664,7 +664,7 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
 }
 
 function statusLabel(record: { status: string; exitCode: number | null; exitSignal: string | null; exitedAt: string | null; idleStoppedAt?: string; idleStoppedSeconds?: number }) {
-  if (record.idleStoppedAt) {
+  if (record.idleStoppedAt && record.exitedAt === record.idleStoppedAt) {
     const seconds = record.idleStoppedSeconds ?? 0
     const duration = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h` : seconds >= 60 ? `${Math.floor(seconds / 60)}m` : `${seconds}s`
     return `stopped (idle ${duration}, ${formatExitTime(new Date(record.idleStoppedAt))})`
