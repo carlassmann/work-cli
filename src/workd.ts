@@ -9,11 +9,12 @@ import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
 import { commandRuntimeStatus, commandTtlExpired, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { processCommand } from "./shell.js"
-import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState, stateRoot } from "./state.js"
+import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot, writeWorkspaceState } from "./state.js"
 import type { Result } from "./result.js"
-import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord } from "./types.js"
+import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
 import { startUpdateChecker } from "./updates.js"
+import { worktreeFingerprint } from "./worktree-activity.js"
 
 const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
   ["run", "down", "stop", "restart", "restartTracked", "prune", "ping", "shutdown"] satisfies Array<DaemonCommand["type"]>,
@@ -295,15 +296,22 @@ function pruneCommands(environment: NodeJS.ProcessEnv, options: { keepDead?: boo
   )
 }
 
+const ACTIVITY_CHECK_INTERVAL_MS = Number(process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"]) || 60_000
+const activityCheckedAt = new Map<string, number>()
+
 async function expireCommands() {
+  const timed = new Set<string>()
   for (const listed of await listWorkspaceStates()) {
     if (!Object.values(listed.commands).some((record) => record.maxTtlSeconds)) continue
+    const workspaceKey = key(listed.project, listed.workspace, "")
+    timed.add(workspaceKey)
     await serialize(workspaceLock(listed.project, listed.workspace), async () => {
       const state = await readWorkspaceState(listed.project, listed.workspace)
       if (!state.ok) {
         debugLog("workd", `TTL state read failed: ${state.error.message}`)
         return
       }
+      if (state.value) await recordWorktreeActivity(state.value, workspaceKey)
       for (const [id, record] of Object.entries(state.value?.commands ?? {})) {
         if (record.exitedAt || !commandTtlExpired(record)) continue
 
@@ -313,6 +321,30 @@ async function expireCommands() {
       }
     })
   }
+  for (const workspaceKey of activityCheckedAt.keys()) {
+    if (!timed.has(workspaceKey)) activityCheckedAt.delete(workspaceKey)
+  }
+}
+
+// TTL counts idle time: any change in the worktree restarts the window for every timed command in it.
+// The worktree is checked once a minute, and again right before a command would expire.
+async function recordWorktreeActivity(state: WorkspaceState, workspaceKey: string) {
+  const records = Object.values(state.commands).filter((record) => record.maxTtlSeconds)
+  const now = Date.now()
+  const due = now - (activityCheckedAt.get(workspaceKey) ?? 0) >= ACTIVITY_CHECK_INTERVAL_MS
+  if (!due && !records.some(commandTtlExpired)) return
+  activityCheckedAt.set(workspaceKey, now)
+
+  const fingerprint = await worktreeFingerprint(state.root)
+  if (!fingerprint || fingerprint === state.worktreeFingerprint) return
+  // The first fingerprint is only a baseline; the window keeps running from when the command started.
+  if (state.worktreeFingerprint) {
+    const activeAt = new Date(now).toISOString()
+    for (const record of records) record.ttlStartedAt = activeAt
+  }
+  state.worktreeFingerprint = fingerprint
+  const written = await writeWorkspaceState(state)
+  if (!written.ok) debugLog("workd", `TTL activity write for ${state.project}/${state.workspace} failed: ${written.error.message}`)
 }
 
 async function expireIdleWorkspaces() {

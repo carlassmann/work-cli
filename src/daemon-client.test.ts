@@ -3,6 +3,8 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import net from "node:net"
 import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import { callDaemon, daemonStatus, ensureDaemon, sendDaemon, stopDaemon } from "./daemon-client.js"
 import { daemonLockFile, daemonPidFile, daemonSocketFile, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { commandRuntimeStatus } from "./processes.js"
@@ -10,6 +12,7 @@ import { isPidRunning } from "./shell.js"
 import { processUnit, sessionScope, systemdUserManagerAvailable, workdUnitName } from "./systemd.js"
 import { tempDir } from "./test-helpers.js"
 
+const execFileAsync = promisify(execFile)
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
 const previousEntrypoint = process.env["WORK_DAEMON_ENTRYPOINT"]
 const previousConfigHome = process.env["XDG_CONFIG_HOME"]
@@ -246,6 +249,39 @@ describe("daemon client", () => {
       for (const name of ["main", "unlimited"]) {
         await callDaemon({ type: "down", project: "demo", workspace: name, environment })
       }
+    }
+  })
+
+  test("worktree changes keep timed commands alive until the worktree goes idle", { timeout: 20_000 }, async () => {
+    const root = await tempDir()
+    await execFileAsync("git", ["init", "-q"], { cwd: root })
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const previousInterval = process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"]
+    process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"] = "200"
+    const config = { project: "demo", commands: { worker: { run: "node -e 'setTimeout(() => {}, 30000)'" } } }
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "", WORK_MAX_TTL_SECONDS: "3" }
+    const workspace = { project: "demo", workspace: "main", branch: "main", root }
+    try {
+      const started = await callDaemon({ type: "run", config, workspace, command: "worker", exposure: { mode: "local" }, environment })
+      assert.ok(started.ok)
+      if (!started.ok) return
+      const editUntil = Date.now() + 5000
+      for (let edit = 0; Date.now() < editUntil; edit++) {
+        await fs.writeFile(path.join(root, "notes.txt"), `edit ${edit}\n`)
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+      const state = await readWorkspaceState("demo", "main")
+      const record = state.ok ? state.value?.commands["worker"] : undefined
+      assert.ok(record)
+      if (!record) return
+      assert.equal(await commandRuntimeStatus(record), "up")
+      assert.ok(Date.parse(record.ttlStartedAt ?? "") > Date.parse(started.value.data.record.ttlStartedAt ?? ""))
+      await waitForEmptyWorkspace("demo", "main")
+      assert.equal(await commandRuntimeStatus(record), "dead")
+    } finally {
+      if (previousInterval === undefined) delete process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"]
+      else process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"] = previousInterval
+      await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
     }
   })
 
