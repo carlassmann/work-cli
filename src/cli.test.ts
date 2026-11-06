@@ -522,6 +522,63 @@ describe("cli", () => {
     assert.equal(urls.stdout, "no routed commands for tilly/main\n")
   })
 
+  test("ps distinguishes idle stops in text and JSON and omits their URLs", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const exitedAt = new Date()
+    exitedAt.setUTCHours(12, 4, 31, 0)
+    const env = { TZ: "UTC" }
+
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly",
+      workspace: "main",
+      branch: "main",
+      root,
+      commands: {
+        web: {
+          id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root,
+          log: path.join(root, "web.log"), url: "https://web-main-tilly.localhost", startedAt: new Date().toISOString(),
+          pid: 99999999, exitedAt: exitedAt.toISOString(), idleStoppedAt: exitedAt.toISOString(), idleStoppedSeconds: 7200,
+        },
+      },
+    }))
+
+    const ps = await runCli(["ps"], { cwd: root, stateRoot, env })
+    assert.equal(ps.exitCode, 0)
+    assert.match(ps.stdout, /^stopped \(idle 2h, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+
+    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot })
+    assert.deepEqual(JSON.parse(json.stdout), [{
+      project: "tilly", workspace: "main", command: "web", status: "dead", pid: 99999999,
+      url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: exitedAt.toISOString(),
+      idleStoppedAt: exitedAt.toISOString(), idleStoppedSeconds: 7200,
+    }])
+
+    const urls = await runCli(["urls"], { cwd: root, stateRoot })
+    assert.equal(urls.stdout, "no routed commands for tilly/main\n")
+  })
+
+  test("idle stop preserves the displayed cause and time of an earlier crash", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const exitedAt = new Date()
+    exitedAt.setUTCHours(12, 4, 31, 0)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root,
+      commands: { web: {
+        id: "web", label: "web", command: "web", run: "web", route: null, cwd: root,
+        log: path.join(root, "web.log"), url: null, startedAt: exitedAt.toISOString(), pid: 99999999,
+        exitedAt: exitedAt.toISOString(), exitCode: 1,
+        idleStoppedAt: new Date(exitedAt.getTime() + 1000).toISOString(), idleStoppedSeconds: 7200,
+      } },
+    }))
+    const ps = await runCli(["ps", "--all"], { cwd: root, stateRoot, env: { TZ: "UTC" } })
+    assert.equal(ps.exitCode, 0)
+    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+  })
+
   test("wait matches a log line from the current run", async (t) => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")

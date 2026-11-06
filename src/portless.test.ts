@@ -2,7 +2,7 @@ import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { commandProcess, commandRoute, portlessEndpoints, portlessPortsForConfig, refreshRouteUrl, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
+import { commandProcess, commandRoute, portlessAppPort, portlessEndpoints, portlessPortsForConfig, refreshRouteUrl, routeEnvironmentForConfig, usesPortless, websocketUrl } from "./portless.js"
 import { tempDir } from "./test-helpers.js"
 import type { DevConfig } from "./types.js"
 
@@ -12,6 +12,23 @@ const config: DevConfig = {
 }
 
 describe("portless", () => {
+  test("honors fixed backend ports from env, portless.json, and package.json", async () => {
+    const cwd = await tempDir()
+    assert.deepEqual(await portlessAppPort(cwd, {}), { ok: true, value: undefined })
+    await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({ portless: { appPort: 3001 } }))
+    assert.deepEqual(await portlessAppPort(cwd, {}), { ok: true, value: 3001 })
+    await fs.writeFile(path.join(cwd, "portless.json"), JSON.stringify({ appPort: 3002 }))
+    assert.deepEqual(await portlessAppPort(cwd, {}), { ok: true, value: 3002 })
+    assert.deepEqual(await portlessAppPort(cwd, { PORTLESS_APP_PORT: "3003" }), { ok: true, value: 3003 })
+    for (const value of ["invalid", "0", "65536", "3.5", "0xBB8", "3e3"]) {
+      assert.equal((await portlessAppPort(cwd, { PORTLESS_APP_PORT: value })).ok, false)
+    }
+    await fs.writeFile(path.join(cwd, "portless.json"), JSON.stringify({ appPort: "3000" }))
+    assert.equal((await portlessAppPort(cwd, {})).ok, false)
+    await fs.writeFile(path.join(cwd, "portless.json"), JSON.stringify({ apps: { web: { appPort: 3004 } } }))
+    assert.deepEqual(await portlessAppPort(cwd, {}), { ok: true, value: undefined })
+  })
+
   test("uses portless for routed commands by default", () => {
     assert.equal(usesPortless({ run: "bun run dev", route: true }), true)
     assert.equal(usesPortless({ run: "bun run dev" }), false)

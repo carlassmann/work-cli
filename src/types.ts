@@ -20,6 +20,7 @@ export type CommandConfig = {
 
 export type DevConfig = {
   project: string
+  idleTimeoutSeconds?: number
   maxTtlSeconds?: number
   env?: Record<string, string>
   worktrees?: {
@@ -71,8 +72,14 @@ export type CommandRecord = {
   ready?: ReadyCheck
   startedAt: string
   logOffset?: number
+  idleTimeoutSeconds?: number
   maxTtlSeconds?: number
   ttlStartedAt?: string
+  activityStartedAt?: string
+  lastActivityAt?: string
+  idleSockets?: Record<string, number>
+  idleStoppedAt?: string
+  idleStoppedSeconds?: number
   pid: number
   exitedAt?: string
   exitCode?: number
@@ -81,6 +88,7 @@ export type CommandRecord = {
 
 export type WorkspaceState = WorkspaceRecord & {
   commands: Record<string, CommandRecord>
+  idleTimeoutSeconds?: number
   maxTtlSeconds?: number
   env?: Record<string, string>
   exposure?: Exposure
@@ -88,7 +96,7 @@ export type WorkspaceState = WorkspaceRecord & {
   worktreeFingerprint?: string
 }
 
-export const DAEMON_PROTOCOL_VERSION = 11
+export const DAEMON_PROTOCOL_VERSION = 12
 
 export type DaemonCommand =
   | {

@@ -151,6 +151,74 @@ describe("process lifecycle", () => {
     }
   })
 
+  test("captures idle settings and preserves the idle clock across automatic restarts", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const workspace = testWorkspace(root)
+    const config = testConfig("node -e 'setTimeout(() => {}, 30000)'")
+    const environment = { PATH: process.env["PATH"], WORK_IDLE_TIMEOUT_SECONDS: "60" }
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, environment)
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+
+    try {
+      assert.equal(started.value.record.idleTimeoutSeconds, 60)
+      const state = await readWorkspaceState("tilly", "feature-x")
+      assert.ok(state.ok && state.value)
+      if (!state.ok || !state.value) return
+      const record = state.value.commands["web"]!
+      record.lastActivityAt = new Date(Date.now() - 10_000).toISOString()
+      record.idleSockets = { retained: 42 }
+      assert.equal((await writeWorkspaceState(state.value)).ok, true)
+
+      const automatic = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "invalid" }, { preserveTtl: true })
+      assert.ok(automatic.ok)
+      if (automatic.ok) {
+        assert.equal(automatic.value.record.lastActivityAt, record.lastActivityAt)
+        assert.equal(automatic.value.record.activityStartedAt, record.activityStartedAt)
+        assert.deepEqual(automatic.value.record.idleSockets, record.idleSockets)
+        assert.equal(automatic.value.record.idleTimeoutSeconds, 60)
+      }
+
+      if (automatic.ok) {
+        process.kill(-automatic.value.record.pid, "SIGTERM")
+        const deadline = Date.now() + 2000
+        while (await commandRuntimeStatus(automatic.value.record) === "up" && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+      }
+      const configuredAutomatic = await startCommand(config, workspace, "web", { mode: "local" }, environment, { preserveTtl: true })
+      assert.ok(configuredAutomatic.ok)
+      if (configuredAutomatic.ok) {
+        assert.equal(configuredAutomatic.value.record.lastActivityAt, record.lastActivityAt)
+        assert.equal(configuredAutomatic.value.record.activityStartedAt, record.activityStartedAt)
+      }
+
+      const invalid = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "invalid" })
+      assert.equal(invalid.ok, false)
+      if (configuredAutomatic.ok) assert.equal(await commandRuntimeStatus(configuredAutomatic.value.record), "up")
+
+      const manual = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "120" })
+      assert.ok(manual.ok)
+      if (manual.ok) {
+        assert.equal(manual.value.record.idleTimeoutSeconds, 120)
+        assert.equal(manual.value.record.lastActivityAt, manual.value.record.startedAt)
+        assert.equal(manual.value.record.activityStartedAt, manual.value.record.startedAt)
+        assert.deepEqual(manual.value.record.idleSockets, {})
+        assert.notEqual(manual.value.record.lastActivityAt, record.lastActivityAt)
+      }
+      const disabled = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "0" })
+      assert.ok(disabled.ok)
+      if (disabled.ok) {
+        assert.equal(disabled.value.record.idleTimeoutSeconds, undefined)
+        assert.equal(disabled.value.record.lastActivityAt, undefined)
+        assert.equal(disabled.value.record.idleSockets, undefined)
+      }
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
   test("starts, records, and stops a configured command", async () => {
     const root = await tempDir()
     const workspace = testWorkspace(root)
@@ -539,6 +607,16 @@ while :; do sleep 1; done
     assert.ok(record?.exitedAt)
     assert.equal(await commandRuntimeStatus(record!), "dead")
     assert.deepEqual(await pruneDeadCommands(process.env, undefined, undefined, { keepDead: true }), { ok: true, value: 0 })
+
+    assert.equal((await stopCommand("tilly", "feature-x", "web", { idleSeconds: 7200 })).ok, true)
+    const idleStopped = await readWorkspaceState("tilly", "feature-x")
+    assert.ok(idleStopped.ok && idleStopped.value)
+    if (idleStopped.ok && idleStopped.value) {
+      const stoppedRecord = idleStopped.value.commands["web"]!
+      assert.equal(stoppedRecord.exitedAt, record!.exitedAt)
+      assert.equal(stoppedRecord.exitCode, 3)
+      assert.ok(stoppedRecord.idleStoppedAt)
+    }
 
     const restarted = await restartTrackedCommand("tilly", "feature-x", "web")
     assert.ok(restarted.ok)
