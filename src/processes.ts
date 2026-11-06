@@ -5,7 +5,7 @@ import { spawn } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 import { reserveBackendPort } from "./cloudflare.js"
 import { syncExposures } from "./exposure.js"
-import { resolveMaxTtlSeconds } from "./config.js"
+import { resolveIdleTimeoutSeconds, resolveMaxTtlSeconds } from "./config.js"
 import { childEnvironment, loadWorkspaceEnvironment } from "./environment.js"
 import { exitMarker, forEachLogChunk, isMarkerLine, parseExitMarker, rotateLargeLog, startMarker, writeMarker } from "./logs.js"
 import type { CommandExit } from "./logs.js"
@@ -52,9 +52,11 @@ export async function startCommand(
   const state = stateResult.value
   const existing = state?.commands[id]
   if (preserveTtl && !existing) return errResult("ProcessError", `no tracked command: ${workspace.workspace}/${id}`)
-  if (preserveTtl && existing && commandTtlExpired(existing)) return ok({ record: existing, started: false })
+  if (preserveTtl && existing && (existing.idleStoppedAt || commandTtlExpired(existing))) return ok({ record: existing, started: false })
   const ttl = preserveTtl ? ok(existing?.maxTtlSeconds ?? 0) : await resolveMaxTtlSeconds(config, invokingEnvironment)
   if (!ttl.ok) return ttl
+  const idle = preserveTtl ? ok(existing?.idleTimeoutSeconds ?? 0) : await resolveIdleTimeoutSeconds(config, invokingEnvironment)
+  if (!idle.ok) return idle
   const stateMode = state?.exposure?.mode ?? "local"
   const commandStatuses = await Promise.all(Object.values(state?.commands ?? {}).map(commandRuntimeStatus))
   const hasLiveCommand = commandStatuses.includes("up")
@@ -83,11 +85,11 @@ export async function startCommand(
   }
 
   const published = exposure.mode === "cloudflare" && Boolean(route)
-  const backendPortResult = published ? await reserveBackendPort() : ok<number | undefined>(undefined)
+  const backendPortResult = (published || (route && idle.value > 0)) ? await reserveBackendPort() : ok<number | undefined>(undefined)
   if (!backendPortResult.ok) return backendPortResult
   const backendPort = backendPortResult.value
   const commandExec = commandProcess(command.run, route, backendPort)
-  if (preserveTtl && existing && commandTtlExpired(existing)) return ok({ record: existing, started: false })
+  if (preserveTtl && existing && (existing.idleStoppedAt || commandTtlExpired(existing))) return ok({ record: existing, started: false })
   const spawned = await spawnLogged(id, commandExec, {
     cwd,
     log,
@@ -123,6 +125,7 @@ export async function startCommand(
     ...(command.ready ? { ready: command.ready } : {}),
     startedAt,
     logOffset,
+    ...(idle.value > 0 ? { idleTimeoutSeconds: idle.value, lastActivityAt: startedAt, idleSockets: {} } : {}),
     ...(maxTtlSeconds > 0 ? {
       maxTtlSeconds,
       ttlStartedAt: preserveTtl && existing ? existing.ttlStartedAt ?? existing.startedAt : startedAt,
@@ -133,6 +136,8 @@ export async function startCommand(
   nextState.root = workspace.root
   nextState.branch = workspace.branch
   nextState.sourceRoot = workspace.sourceRoot ?? workspace.root
+  if (config.idleTimeoutSeconds !== undefined) nextState.idleTimeoutSeconds = config.idleTimeoutSeconds
+  else delete nextState.idleTimeoutSeconds
   if (config.maxTtlSeconds !== undefined) nextState.maxTtlSeconds = config.maxTtlSeconds
   else delete nextState.maxTtlSeconds
   if (config.env) nextState.env = childEnvironment(config.env)
@@ -230,7 +235,7 @@ export async function stopCommand(
   project: string,
   workspace: string,
   id: string,
-  options: { syncExposures?: boolean; environment?: NodeJS.ProcessEnv } = {},
+  options: { syncExposures?: boolean; environment?: NodeJS.ProcessEnv; idleSeconds?: number } = {},
 ): Promise<Result<boolean>> {
   const stateResult = await readWorkspaceState(project, workspace)
   if (!stateResult.ok) return stateResult
@@ -244,7 +249,13 @@ export async function stopCommand(
   const stopped = await stopTrackedProcess(command)
   if (!stopped.ok) return stopped
 
-  delete state.commands[id]
+  if (options.idleSeconds !== undefined) {
+    command.exitedAt = new Date().toISOString()
+    command.idleStoppedAt = command.exitedAt
+    command.idleStoppedSeconds = options.idleSeconds
+  } else {
+    delete state.commands[id]
+  }
   clearEmptyWorkspaceExposure(state)
   const write = await writeWorkspaceState(state)
   if (!write.ok) return write
@@ -284,9 +295,11 @@ export async function restartTrackedCommand(
     return errResult("ProcessError", `tracked record for ${workspace}/${id} predates this work version. Run: work stop ${id} && work run ${id}`)
   }
 
-  if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
+  if (preserveTtl && (command.idleStoppedAt || commandTtlExpired(command))) return ok({ record: command, started: false })
   const ttl = preserveTtl ? ok(command.maxTtlSeconds ?? 0) : await resolveMaxTtlSeconds(state, invokingEnvironment)
   if (!ttl.ok) return ttl
+  const idle = preserveTtl ? ok(command.idleTimeoutSeconds ?? 0) : await resolveIdleTimeoutSeconds(state, invokingEnvironment)
+  if (!idle.ok) return idle
 
   const environment = await loadWorkspaceEnvironment(
     state.sourceRoot ?? state.root,
@@ -307,8 +320,12 @@ export async function restartTrackedCommand(
   const route = command.route ? portlessLabel(command.route) : null
   const port = ports[id] ?? 443
 
-  const commandExec = commandProcess(command.run, route, command.backendPort)
-  if (preserveTtl && commandTtlExpired(command)) return ok({ record: command, started: false })
+  const backendPort = command.backendPort === undefined && route && idle.value > 0
+    ? await reserveBackendPort() : ok(command.backendPort)
+  if (!backendPort.ok) return backendPort
+  const resolvedBackendPort = backendPort.value
+  const commandExec = commandProcess(command.run, route, resolvedBackendPort)
+  if (preserveTtl && (command.idleStoppedAt || commandTtlExpired(command))) return ok({ record: command, started: false })
   const spawned = await spawnLogged(id, commandExec, {
     cwd: command.cwd,
     log: command.log,
@@ -333,6 +350,18 @@ export async function restartTrackedCommand(
     command: commandExec.display,
     startedAt: new Date().toISOString(),
     logOffset: spawned.value.logOffset,
+  }
+  if (resolvedBackendPort) record.backendPort = resolvedBackendPort
+  delete record.idleStoppedAt
+  delete record.idleStoppedSeconds
+  if (idle.value > 0) {
+    record.idleTimeoutSeconds = idle.value
+    record.lastActivityAt = record.startedAt
+    record.idleSockets = {}
+  } else {
+    delete record.idleTimeoutSeconds
+    delete record.lastActivityAt
+    delete record.idleSockets
   }
   delete record.exitedAt
   delete record.exitCode

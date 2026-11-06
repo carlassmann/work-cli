@@ -50,6 +50,7 @@ Example:
 Workspace fields:
   env                 environment inherited by setup and every command
   maxTtlSeconds       maximum command lifetime in seconds, 0 disables
+  idleTimeoutSeconds  stop the workspace after routed servers are idle, 0 disables
 
 Global defaults: ~/.config/work/config.json, or $XDG_CONFIG_HOME/work/config.json.
 Example: { "maxTtlSeconds": 3600 }
@@ -63,6 +64,21 @@ use the stored project setting. Changing defaults leaves running commands unchan
 workd checks every second and stops expired commands
 without restarting them, including commands with restart: "on-exit".
 Deadlines survive daemon restarts. TTL requires a running daemon.
+
+Idle timeout precedence: WORK_IDLE_TIMEOUT_SECONDS, project idleTimeoutSeconds,
+global idleTimeoutSeconds, then disabled. Example global config for two hours:
+  { "idleTimeoutSeconds": 7200, "maxTtlSeconds": 28800 }
+Same validation and capture/restart rules as TTL. Starts count as activity.
+On Linux, workd samples backend TCP receive counters and new connections every 15s,
+including closing/TIME-WAIT sockets to catch short requests between samples.
+An open socket alone does not count. All routed commands must exceed their captured
+timeouts before workd stops every command in the workspace. No routed commands
+means no idle stop. Disabled or unobservable routed commands prevent idle stops.
+Activity timestamps and socket samples survive daemon restarts.
+Requires Linux and ss from iproute2; macOS and other platforms do not idle-stop.
+Sampling failures skip idle enforcement; TTL still applies. Traffic that opens and
+vanishes entirely between samples can be missed. Stops can lag by one sample.
+work ps shows stopped (idle 2h, 14:03:00); work up starts commands again.
 
 Environment precedence:
   work.config.js env
@@ -212,6 +228,13 @@ Restart policy:
 maxTtlSeconds in project/global config or WORK_MAX_TTL_SECONDS limits command lifetime. Expired commands
 stay stopped. Automatic restarts and daemon restarts preserve the TTL deadline.
 Prune preserves records for supervised commands so their deadlines remain intact.
+
+idleTimeoutSeconds in project/global config or WORK_IDLE_TIMEOUT_SECONDS stops
+entire workspaces after all routed servers are idle. Set 7200 for two hours.
+workd samples received bytes and new backend connections every 15s on Linux with ss.
+Idle websockets do not keep commands alive. macOS is a no-op; TTL remains available.
+Idle stops retain records for ps/logs and suppress on-exit restarts across daemon
+restarts. work up or an explicit restart brings commands back. See work docs config.
 
 Dead records:
   workd marks a dead command with its exit code or signal and exit time instead

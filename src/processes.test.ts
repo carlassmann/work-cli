@@ -151,6 +151,55 @@ describe("process lifecycle", () => {
     }
   })
 
+  test("captures idle settings, preserves automatic restart settings and resets launch activity", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const workspace = testWorkspace(root)
+    const config = testConfig("node -e 'setTimeout(() => {}, 30000)'")
+    const environment = { PATH: process.env["PATH"], WORK_IDLE_TIMEOUT_SECONDS: "60" }
+    const started = await startCommand(config, workspace, "web", { mode: "local" }, environment)
+    assert.equal(started.ok, true)
+    if (!started.ok) return
+
+    try {
+      assert.equal(started.value.record.idleTimeoutSeconds, 60)
+      const state = await readWorkspaceState("tilly", "feature-x")
+      assert.ok(state.ok && state.value)
+      if (!state.ok || !state.value) return
+      const record = state.value.commands["web"]!
+      record.lastActivityAt = new Date(Date.now() - 10_000).toISOString()
+      assert.equal((await writeWorkspaceState(state.value)).ok, true)
+
+      const automatic = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "invalid" }, { preserveTtl: true })
+      assert.ok(automatic.ok)
+      if (automatic.ok) {
+        assert.equal(automatic.value.record.lastActivityAt, automatic.value.record.startedAt)
+        assert.equal(automatic.value.record.idleTimeoutSeconds, 60)
+      }
+
+      const invalid = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "invalid" })
+      assert.equal(invalid.ok, false)
+      if (automatic.ok) assert.equal(await commandRuntimeStatus(automatic.value.record), "up")
+
+      const manual = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "120" })
+      assert.ok(manual.ok)
+      if (manual.ok) {
+        assert.equal(manual.value.record.idleTimeoutSeconds, 120)
+        assert.equal(manual.value.record.lastActivityAt, manual.value.record.startedAt)
+        assert.notEqual(manual.value.record.lastActivityAt, record.lastActivityAt)
+      }
+      const disabled = await restartTrackedCommand("tilly", "feature-x", "web", { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "0" })
+      assert.ok(disabled.ok)
+      if (disabled.ok) {
+        assert.equal(disabled.value.record.idleTimeoutSeconds, undefined)
+        assert.equal(disabled.value.record.lastActivityAt, undefined)
+        assert.equal(disabled.value.record.idleSockets, undefined)
+      }
+    } finally {
+      await stopCommand("tilly", "feature-x", "web")
+    }
+  })
+
   test("starts, records, and stops a configured command", async () => {
     const root = await tempDir()
     const workspace = testWorkspace(root)

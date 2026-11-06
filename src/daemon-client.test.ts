@@ -31,6 +31,61 @@ afterEach(async () => {
 })
 
 describe("daemon client", () => {
+  test("idle stops every command, retains records and suppresses supervision across daemon restarts", { timeout: 15_000 }, async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const environment = { PATH: process.env["PATH"] ?? "", XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] ?? "", WORK_IDLE_TIMEOUT_SECONDS: "60", WORK_MAX_TTL_SECONDS: "0" }
+    const config = { project: "idle", commands: {
+      web: { run: "node -e 'setInterval(() => {}, 1000)'", restart: "on-exit" as const },
+      worker: { run: "node -e 'setInterval(() => {}, 1000)'", restart: "on-exit" as const },
+    } }
+    const workspace = { project: "idle", workspace: "main", branch: "main", root }
+    for (const command of ["web", "worker"]) {
+      assert.equal((await callDaemon({ type: "run", config, workspace, command, exposure: { mode: "local" }, environment })).ok, true)
+    }
+    try {
+      assert.equal((await stopDaemon()).ok, true)
+      const current = await readWorkspaceState("idle", "main")
+      assert.ok(current.ok && current.value)
+      if (!current.ok || !current.value) return
+      const state = current.value
+      for (const record of Object.values(state.commands)) {
+        record.startedAt = new Date(Date.now() - 120_000).toISOString()
+        record.lastActivityAt = record.startedAt
+      }
+      state.commands["web"]!.url = "http://idle.localhost"
+      state.commands["web"]!.backendPort = 1
+      assert.equal((await writeWorkspaceState(state)).ok, true)
+      assert.equal((await ensureDaemon()).ok, true)
+      const deadline = Date.now() + 7000
+      let stopped = false
+      while (Date.now() < deadline) {
+        const latest = await readWorkspaceState("idle", "main")
+        stopped = Boolean(latest.ok && latest.value && Object.values(latest.value.commands).every((record) => record.idleStoppedAt))
+        if (stopped) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      assert.equal(stopped, true)
+      for (const record of Object.values(state.commands)) assert.equal(await commandRuntimeStatus(record), "dead")
+      assert.equal((await stopDaemon()).ok, true)
+      assert.equal((await ensureDaemon()).ok, true)
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const recovered = await readWorkspaceState("idle", "main")
+      assert.ok(recovered.ok && recovered.value)
+      if (recovered.ok && recovered.value) {
+        for (const record of Object.values(recovered.value.commands)) {
+          assert.ok(record.idleStoppedAt)
+          assert.equal(await commandRuntimeStatus(record), "dead")
+        }
+      }
+      const up = await callDaemon({ type: "run", config, workspace, command: "web", exposure: { mode: "local" }, environment })
+      assert.ok(up.ok && up.value.data.started)
+      if (up.ok) assert.equal(up.value.data.record.idleStoppedAt, undefined)
+    } finally {
+      await callDaemon({ type: "down", project: "idle", workspace: "main", environment })
+    }
+  })
+
   test("prune preserves supervised dead records and their deadlines before and after daemon recovery", async () => {
     const root = await tempDir()
     process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
@@ -118,6 +173,9 @@ describe("daemon client", () => {
     try {
       const invalid = await callDaemon({ type: "restart", config, workspace, command: "web", exposure: { mode: "local" }, environment: { ...environment, WORK_MAX_TTL_SECONDS: "invalid" } })
       assert.equal(invalid.ok, false)
+      assert.equal(await commandRuntimeStatus(started.value.data.record), "up")
+      const invalidIdle = await callDaemon({ type: "restart", config, workspace, command: "web", exposure: { mode: "local" }, environment: { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "invalid" } })
+      assert.equal(invalidIdle.ok, false)
       assert.equal(await commandRuntimeStatus(started.value.data.record), "up")
       const restarted = await callDaemon({ type: "restart", config, workspace, command: "web", exposure: { mode: "local" }, environment: { ...environment, WORK_MAX_TTL_SECONDS: "120" } })
       assert.ok(restarted.ok)

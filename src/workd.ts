@@ -3,12 +3,13 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import { syncExposures } from "./exposure.js"
 import { recoverTailnetProxy } from "./tailscale.js"
-import { resolveMaxTtlSeconds } from "./config.js"
+import { resolveIdleTimeoutSeconds, resolveMaxTtlSeconds } from "./config.js"
+import { recordSocketActivity, sampleBackendSockets, workspaceIdleSeconds } from "./idle.js"
 import { childEnvironment } from "./environment.js"
 import { debugLog, describe, formatError } from "./result.js"
 import { commandRuntimeStatus, commandTtlExpired, pruneDeadCommands, restartTrackedCommand, startCommand, stopCommand } from "./processes.js"
 import { processCommand } from "./shell.js"
-import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, stateRoot } from "./state.js"
+import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState, stateRoot } from "./state.js"
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
@@ -61,7 +62,7 @@ if (!acquiredDaemonLock) process.exit(0)
 const daemonLock = acquiredDaemonLock as import("node:fs/promises").FileHandle
 for (const state of await listWorkspaceStates()) {
   for (const [command, record] of Object.entries(state.commands)) {
-    if (record.restart === "on-exit") {
+    if (record.restart === "on-exit" && !record.idleStoppedAt) {
       desired.set(key(state.project, state.workspace, command), {
         type: "tracked", project: state.project, workspace: state.workspace, command, environment: childEnvironment(),
       })
@@ -208,6 +209,8 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
       return serialize(workspaceLock(command.config.project, command.workspace.workspace), async () => {
         const ttl = await resolveMaxTtlSeconds(command.config, command.environment)
         if (!ttl.ok) return ttl
+        const idle = await resolveIdleTimeoutSeconds(command.config, command.environment)
+        if (!idle.ok) return idle
         const state = await readWorkspaceState(command.config.project, command.workspace.workspace)
         if (!state.ok) return state
         const existing = state.value?.commands[command.command]
@@ -224,7 +227,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
       return serialize(workspaceLock(command.project, command.workspace), async () => {
         const targetKey = key(command.project, command.workspace, command.command)
         const result = await restartTrackedCommand(command.project, command.workspace, command.command, command.environment)
-        if (result.ok && result.value.record.restart === "on-exit") {
+        if (result.ok && result.value.record.restart === "on-exit" && !result.value.record.idleStoppedAt) {
           desired.set(targetKey, { type: "tracked", project: command.project, workspace: command.workspace, command: command.command, environment: command.environment })
         }
         return result
@@ -270,6 +273,7 @@ async function maintain() {
   maintenanceRunning = true
   try {
     await expireCommands()
+    if (maintenanceTicks % 15 === 0) await expireIdleWorkspaces()
     await reconcile()
     maintenanceTicks++
     if (maintenanceTicks % 5 === 0) {
@@ -311,6 +315,45 @@ async function expireCommands() {
   }
 }
 
+async function expireIdleWorkspaces() {
+  if (process.platform !== "linux") return
+  for (const listed of await listWorkspaceStates()) {
+    if (!Object.values(listed.commands).some((record) => record.idleTimeoutSeconds && record.url && !record.idleStoppedAt)) continue
+    await serialize(workspaceLock(listed.project, listed.workspace), async () => {
+      const current = await readWorkspaceState(listed.project, listed.workspace)
+      if (!current.ok || !current.value) return
+      const state = current.value
+      const routed = Object.values(state.commands).filter((record) => record.url && !record.idleStoppedAt)
+      if (routed.some((record) => !record.backendPort || !record.idleTimeoutSeconds)) return
+      let sample: Awaited<ReturnType<typeof sampleBackendSockets>>
+      try {
+        sample = await sampleBackendSockets(new Set(routed.map((record) => record.backendPort!)))
+      } catch (cause) {
+        // Never interpret a failed observation as an idle workspace.
+        debugLog("workd", `idle socket sample failed: ${describe(cause)}`)
+        return
+      }
+      const now = Date.now()
+      for (const record of routed) recordSocketActivity(record, sample[String(record.backendPort)]!, now)
+      const written = await writeWorkspaceState(state)
+      if (!written.ok) {
+        debugLog("workd", `idle state write failed: ${written.error.message}`)
+        return
+      }
+      const idleSeconds = workspaceIdleSeconds(Object.values(state.commands), now)
+      if (idleSeconds === undefined) return
+      for (const id of Object.keys(state.commands)) desired.delete(key(state.project, state.workspace, id))
+      for (const [id, record] of Object.entries(state.commands)) {
+        if (record.idleStoppedAt) continue
+        const stopped = await stopCommand(state.project, state.workspace, id, { idleSeconds, syncExposures: false })
+        if (!stopped.ok) debugLog("workd", `idle stop ${state.project}/${state.workspace}/${id} failed: ${stopped.error.message}`)
+      }
+      const synced = await syncExposures(process.env)
+      if (!synced.ok) debugLog("workd", `idle exposure sync failed: ${synced.error.message}`)
+    })
+  }
+}
+
 async function reconcile() {
   for (const [targetKey, target] of desired.entries()) {
     const project = target.type === "configured" ? target.config.project : target.project
@@ -321,6 +364,10 @@ async function reconcile() {
       if (!state.ok) return state
       const record = state.value?.commands[target.command]
       if (!record) {
+        desired.delete(targetKey)
+        return { ok: true, value: { skipped: true } } as const
+      }
+      if (record.idleStoppedAt) {
         desired.delete(targetKey)
         return { ok: true, value: { skipped: true } } as const
       }

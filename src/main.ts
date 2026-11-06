@@ -649,6 +649,7 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
         exitCode: command.exitCode ?? null,
         exitSignal: command.exitSignal ?? null,
         exitedAt: command.exitedAt ?? null,
+        ...(command.idleStoppedAt ? { idleStoppedAt: command.idleStoppedAt, idleStoppedSeconds: command.idleStoppedSeconds } : {}),
       })
     }
   }
@@ -662,7 +663,12 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
   return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
 }
 
-function statusLabel(record: { status: string; exitCode: number | null; exitSignal: string | null; exitedAt: string | null }) {
+function statusLabel(record: { status: string; exitCode: number | null; exitSignal: string | null; exitedAt: string | null; idleStoppedAt?: string; idleStoppedSeconds?: number }) {
+  if (record.idleStoppedAt) {
+    const seconds = record.idleStoppedSeconds ?? 0
+    const duration = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h` : seconds >= 60 ? `${Math.floor(seconds / 60)}m` : `${seconds}s`
+    return `stopped (idle ${duration}, ${formatExitTime(new Date(record.idleStoppedAt))})`
+  }
   if (!record.exitedAt) return record.status
   const exit = record.exitSignal ?? (record.exitCode === null ? null : `exit ${record.exitCode}`)
   return `${record.status} (${exit ? `${exit}, ` : ""}${formatExitTime(new Date(record.exitedAt))})`

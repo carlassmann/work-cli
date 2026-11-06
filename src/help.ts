@@ -317,6 +317,7 @@ Output:
 Status:
   up
   dead (exit 1, 12:04:31)   exit code or signal and time, once workd notices
+  stopped (idle 2h, 14:03:00)   workspace stopped after routed servers were idle
 
 Dead commands stay listed until they start again, work down, work stop, or work prune.
 
@@ -481,6 +482,9 @@ Behavior:
   work up/run/stop/restart/prune auto-start workd when needed.
   workd owns configured command start/stop/restart.
   Commands with restart: "on-exit" are restarted when they die while workd runs.
+  idleTimeoutSeconds or WORK_IDLE_TIMEOUT_SECONDS stops idle workspaces on Linux.
+  Set 7200 for two hours. Requires ss; see work docs config.
+  Idle stops suppress on-exit restarts. work up brings commands back.
   Stopping workd leaves tracked commands running; use work stop or work down to stop them.
   On Linux with a systemd user session, workd starts in its own scope
   (work-workd-*.scope), so it and its commands outlive the terminal or agent

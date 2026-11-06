@@ -1,7 +1,7 @@
 import path from "node:path"
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { createConfig, loadConfig, resolveMaxTtlSeconds } from "./config.js"
+import { createConfig, loadConfig, resolveIdleTimeoutSeconds, resolveMaxTtlSeconds } from "./config.js"
 import { tempDir, writeFile } from "./test-helpers.js"
 
 describe("config", () => {
@@ -45,6 +45,49 @@ describe("config", () => {
       const loaded = await loadConfig(root)
       assert.equal(loaded.ok, false, value)
       if (!loaded.ok) assert.match(loaded.error.message, /maxTtlSeconds/)
+    }
+  })
+
+  test("resolves idle timeout with env precedence, global fallback, and explicit opt-out", async () => {
+    const config = { project: "tilly", commands: {} }
+    const environment = { XDG_CONFIG_HOME: await tempDir() }
+    assert.deepEqual(await resolveIdleTimeoutSeconds(config, environment), { ok: true, value: 0 })
+    await writeFile(path.join(environment.XDG_CONFIG_HOME, "work", "config.json"), '{"idleTimeoutSeconds": 3600}')
+    assert.deepEqual(await resolveIdleTimeoutSeconds(config, environment), { ok: true, value: 3600 })
+    assert.deepEqual(await resolveIdleTimeoutSeconds({ idleTimeoutSeconds: 60 }, environment), { ok: true, value: 60 })
+    assert.deepEqual(await resolveIdleTimeoutSeconds({ idleTimeoutSeconds: 0 }, environment), { ok: true, value: 0 })
+    assert.deepEqual(await resolveIdleTimeoutSeconds({ idleTimeoutSeconds: 60 }, { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "120" }), { ok: true, value: 120 })
+    assert.deepEqual(await resolveIdleTimeoutSeconds(config, { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "0" }), { ok: true, value: 0 })
+    for (const value of ["", " ", "invalid", "-1", "Infinity", "NaN"]) {
+      const result = await resolveIdleTimeoutSeconds({ idleTimeoutSeconds: 60 }, { ...environment, WORK_IDLE_TIMEOUT_SECONDS: value })
+      assert.equal(result.ok, false, value)
+    }
+  })
+
+  test("validates global idle config without letting lower precedence files block overrides", async () => {
+    const environment = { XDG_CONFIG_HOME: await tempDir() }
+    const file = path.join(environment.XDG_CONFIG_HOME, "work", "config.json")
+    for (const contents of ["{", "null", "[]", '{"idleTimeoutSeconds": "60"}', '{"idleTimeoutSeconds": -1}', '{"idleTimeoutSeconds": null}', '{"idleTimeoutSeconds": 1e400}']) {
+      await writeFile(file, contents)
+      const invalid = await resolveIdleTimeoutSeconds({}, environment)
+      assert.equal(invalid.ok, false, contents)
+      if (!invalid.ok) assert.match(invalid.error.message, /config\.json/)
+      assert.deepEqual(await resolveIdleTimeoutSeconds({ idleTimeoutSeconds: 0 }, environment), { ok: true, value: 0 })
+      assert.deepEqual(await resolveIdleTimeoutSeconds({}, { ...environment, WORK_IDLE_TIMEOUT_SECONDS: "60" }), { ok: true, value: 60 })
+    }
+    await writeFile(file, "{}")
+    assert.deepEqual(await resolveIdleTimeoutSeconds({}, environment), { ok: true, value: 0 })
+    await writeFile(file, '{"idleTimeoutSeconds": 0}')
+    assert.deepEqual(await resolveIdleTimeoutSeconds({}, environment), { ok: true, value: 0 })
+  })
+
+  test("rejects invalid configured idle timeouts", async () => {
+    for (const value of ['"60"', "null", "-1", "NaN", "Infinity"]) {
+      const root = await tempDir()
+      await writeConfig(root, `export default { project: "tilly", idleTimeoutSeconds: ${value}, commands: {} }`)
+      const loaded = await loadConfig(root)
+      assert.equal(loaded.ok, false, value)
+      if (!loaded.ok) assert.match(loaded.error.message, /idleTimeoutSeconds/)
     }
   })
 

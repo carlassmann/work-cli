@@ -16,14 +16,30 @@ export async function resolveMaxTtlSeconds(
 ): Promise<Result<number>> {
   const raw = environment["WORK_MAX_TTL_SECONDS"]
   if (raw !== undefined) {
-    return validateTtlSeconds(raw.trim() === "" ? NaN : Number(raw), "WORK_MAX_TTL_SECONDS")
+    return validateTimeoutSeconds(raw.trim() === "" ? NaN : Number(raw), "WORK_MAX_TTL_SECONDS")
   }
-  if (config.maxTtlSeconds !== undefined) return validateTtlSeconds(config.maxTtlSeconds, "maxTtlSeconds")
+  if (config.maxTtlSeconds !== undefined) return validateTimeoutSeconds(config.maxTtlSeconds, "maxTtlSeconds")
 
   const globalConfig = await readGlobalConfig(environment)
   if (!globalConfig.ok) return globalConfig
   const value = globalConfig.value["maxTtlSeconds"]
-  return validateTtlSeconds(value === undefined ? 0 : value, `${globalConfigFile(environment)} maxTtlSeconds`)
+  return validateTimeoutSeconds(value === undefined ? 0 : value, `${globalConfigFile(environment)} maxTtlSeconds`)
+}
+
+export async function resolveIdleTimeoutSeconds(
+  config: Pick<DevConfig, "idleTimeoutSeconds">,
+  environment: NodeJS.ProcessEnv,
+): Promise<Result<number>> {
+  const raw = environment["WORK_IDLE_TIMEOUT_SECONDS"]
+  if (raw !== undefined) {
+    return validateTimeoutSeconds(raw.trim() === "" ? NaN : Number(raw), "WORK_IDLE_TIMEOUT_SECONDS")
+  }
+  if (config.idleTimeoutSeconds !== undefined) return validateTimeoutSeconds(config.idleTimeoutSeconds, "idleTimeoutSeconds")
+
+  const globalConfig = await readGlobalConfig(environment)
+  if (!globalConfig.ok) return globalConfig
+  const value = globalConfig.value["idleTimeoutSeconds"]
+  return validateTimeoutSeconds(value === undefined ? 0 : value, `${globalConfigFile(environment)} idleTimeoutSeconds`)
 }
 
 export function globalConfigDir(environment: NodeJS.ProcessEnv = process.env) {
@@ -71,7 +87,7 @@ export async function updateGlobalConfig(
   }
 }
 
-function validateTtlSeconds(value: unknown, field: string): Result<number> {
+function validateTimeoutSeconds(value: unknown, field: string): Result<number> {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return errResult("ConfigError", `${field} must be a finite, non-negative number of seconds`)
   }
@@ -140,8 +156,11 @@ function validateConfig(config: DevConfig): Result<void> {
   const project = validateSlug(config.project, "project")
   if (!project.ok) return project
 
-  const ttl = validateTtlSeconds(config.maxTtlSeconds === undefined ? 0 : config.maxTtlSeconds, "maxTtlSeconds")
+  const ttl = validateTimeoutSeconds(config.maxTtlSeconds === undefined ? 0 : config.maxTtlSeconds, "maxTtlSeconds")
   if (!ttl.ok) return ttl
+
+  const idle = validateTimeoutSeconds(config.idleTimeoutSeconds === undefined ? 0 : config.idleTimeoutSeconds, "idleTimeoutSeconds")
+  if (!idle.ok) return idle
 
   const worktrees = validateWorktrees(config)
   if (!worktrees.ok) return worktrees
