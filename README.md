@@ -171,7 +171,21 @@ WORK_TAILSCALE_DOMAIN=dev.example.com
 WORK_TAILSCALE_CERT=~/path/to/fullchain.pem
 WORK_TAILSCALE_KEY=~/path/to/key.pem
 # WORK_TAILSCALE_PORT=47443   local proxy port
+# WORK_TAILSCALE_SERVE_PORT=443   tailnet port
+# WORK_TAILSCALE_DEFAULT=1   use tailnet URLs without --tailscale
 ```
+
+If `tailscale serve` already uses port 443 on the machine, for another app,
+give previews another tailnet port. The URLs then carry it:
+
+```sh
+work tailscale setup --serve-port 9443
+# https://web-feature-x-myapp.dev.example.com:9443
+```
+
+To make tailnet URLs the default on a machine, so plain `work up` and
+`work urls` give them, run `work tailscale setup --default`. A workspace that
+is still running locally keeps local mode until `work down`.
 
 `work` starts a small HTTPS proxy on `127.0.0.1` and points `tailscale serve`'s
 TCP port 443 at it, so no root is needed. Each request goes through the command's

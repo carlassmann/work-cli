@@ -420,16 +420,23 @@ Manual alternative or overrides, in a gitignored .env.local:
   WORK_TAILSCALE_CERT    certificate (full chain) for *.dev.example.com
   WORK_TAILSCALE_KEY     private key for that certificate
   WORK_TAILSCALE_PORT    local proxy port (default 47443)
+  WORK_TAILSCALE_SERVE_PORT  tailnet port (default 443; setup --serve-port saves it)
+  WORK_TAILSCALE_DEFAULT     1 or 0, overrides setup --default
 
 Run:
   work setup --tailscale
   work up --tailscale
 
+After work tailscale setup --default, plain work up uses tailnet URLs on this
+machine, except in a workspace that is still running locally.
+
 work starts a small HTTPS proxy on 127.0.0.1 and points tailscale serve's TCP
-port 443 at it, so no root is needed. The proxy sends each request through the
-command's local Portless URL with X-Forwarded-Host and X-Forwarded-Proto set to
-the public origin. When the last Tailscale command stops, work stops the proxy
-and removes the port 443 forward.
+port 443 at it, so no root is needed. When tailscale serve already uses 443 on
+the machine (for example for another app), choose another tailnet port with
+work tailscale setup --serve-port 9443; the URLs then end in :9443. The proxy
+sends each request through the command's local Portless URL with
+X-Forwarded-Host and X-Forwarded-Proto set to the public origin. When the last
+Tailscale command stops, work stops the proxy and removes the forward.
 
 WORK_URL and the other WORK_*_URL variables use the tailnet URLs, like
 --cloudflare. The domain resolves to this machine's tailnet address, which

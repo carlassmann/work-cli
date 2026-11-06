@@ -2,7 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { commandExists } from "./shell.js"
 import { cloudflareHostname } from "./cloudflare.js"
-import { tailscaleHostname } from "./tailscale.js"
+import { tailscaleHost } from "./tailscale.js"
 import { portlessLabel, routeName, routeUrl } from "./names.js"
 import { portlessPort } from "./portless-proxy.js"
 import type { RoutedCommand } from "./portless-proxy.js"
@@ -28,7 +28,7 @@ export function publicUrl(config: DevConfig, workspace: string, id: string, comm
   if (exposure.mode === "local") return portlessUrl(config, workspace, id, command, port)
 
   const route = routeName(config.project, workspace, id, command.routeName)
-  return `https://${exposure.mode === "tailscale" ? tailscaleHostname(route, exposure) : cloudflareHostname(route, exposure)}`
+  return `https://${exposure.mode === "tailscale" ? tailscaleHost(route, exposure) : cloudflareHostname(route, exposure)}`
 }
 
 export function routeUrlsForConfig(config: DevConfig, workspace: string, ports: Record<string, number>, exposure: Exposure = { mode: "local" }) {

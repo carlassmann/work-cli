@@ -53,6 +53,9 @@ export type Exposure =
       certFile: string
       keyFile: string
       port: number
+      // Tailnet port that tailscale serve forwards to the proxy; URLs carry it unless it is 443.
+      // Records written before it existed lack it and mean 443.
+      servePort?: number
     }
 
 export type CommandRecord = {

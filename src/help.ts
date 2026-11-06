@@ -419,7 +419,7 @@ Examples:
 Set up private HTTPS previews for your other tailnet devices, once per machine.
 
 Usage:
-  work tailscale setup [--domain <domain>] [--yes]
+  work tailscale setup [--domain <domain>] [--serve-port <port>] [--default | --no-default] [--yes]
 
 Steps (each is skipped when already done):
   1. Reads this machine's Tailscale IPv4 address.
@@ -434,11 +434,16 @@ Steps (each is skipped when already done):
   5. Saves the domain in ~/.config/work/config.json.
 
 Options:
-  --domain <domain>   For example dev.example.com. Defaults to the saved domain.
-  -y, --yes           Answer yes to every question (for scripts).
+  --domain <domain>     For example dev.example.com. Defaults to the saved domain.
+  --serve-port <port>   Tailnet port for previews (default 443). Use another one
+                        when tailscale serve already uses 443 on this machine;
+                        the URLs then carry it, as in https://web-….dev.example.com:9443.
+  --default             Make plain work up use tailnet URLs on this machine.
+  --no-default          Go back to needing --tailscale.
+  -y, --yes             Answer yes to every question (for scripts).
 
 Afterwards:
-  work up --tailscale
+  work up --tailscale  (or plain work up after --default)
   work doctor          checks the certificate, the DNS record, and whether
                        Portless serves the domain on this machine`,
 
