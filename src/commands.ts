@@ -6,17 +6,17 @@ export type CommandSpec = {
 
 export const commandSpecs = [
   { name: "init", summary: "Create work.config.js.", flags: [] },
-  { name: "create", summary: "Create a git worktree.", flags: ["--remote"] },
-  { name: "up", summary: "Start workspace commands.", flags: ["--create", "--no-create", "--remote", "--cloudflare", "--tailscale"] },
-  { name: "setup", summary: "Run the workspace setup hook.", flags: ["--cloudflare", "--tailscale"] },
-  { name: "down", summary: "Stop workspace commands.", flags: ["-a", "--all", "-p", "--project"] },
-  { name: "run", summary: "Start one configured command.", flags: ["-w", "--workspace", "--cloudflare", "--tailscale"] },
-  { name: "restart", summary: "Restart commands.", flags: ["-a", "--all", "-p", "--project", "-w", "--workspace", "--cloudflare", "--tailscale"] },
+  { name: "create", summary: "Create a git worktree.", flags: ["--remote", "-w", "--workspace"] },
+  { name: "up", summary: "Start workspace commands.", flags: ["--create", "--no-create", "--remote", "-w", "--workspace", "--local", "--cloudflare", "--tailscale", "--switch"] },
+  { name: "setup", summary: "Run the workspace setup hook.", flags: ["-w", "--workspace", "--local", "--cloudflare", "--tailscale"] },
+  { name: "down", summary: "Stop workspace commands.", flags: ["-a", "--all", "-p", "--project", "-w", "--workspace"] },
+  { name: "run", summary: "Start one configured command.", flags: ["-w", "--workspace", "--local", "--cloudflare", "--tailscale", "--switch"] },
+  { name: "restart", summary: "Restart commands.", flags: ["-a", "--all", "-p", "--project", "-w", "--workspace", "--local", "--cloudflare", "--tailscale", "--switch"] },
   { name: "ps", summary: "List tracked commands.", flags: ["-a", "--all", "-w", "--workspace", "--json"] },
   { name: "status", summary: "Alias for ps.", flags: ["-a", "--all", "-w", "--workspace", "--json"] },
   { name: "watch", summary: "Live-refresh the ps table.", flags: ["-a", "--all", "-n", "--interval"] },
   { name: "logs", summary: "Print or follow command logs.", flags: ["-f", "--follow", "-n", "--tail", "--lines", "-a", "--all", "-p", "--project", "-w", "--workspace"] },
-  { name: "urls", summary: "List workspace URLs.", flags: ["-p", "--project", "--json"] },
+  { name: "urls", summary: "List workspace URLs.", flags: ["-p", "--project", "-w", "--workspace", "--json"] },
   { name: "stop", summary: "Stop tracked commands.", flags: ["-p", "--project", "-w", "--workspace"] },
   { name: "wait", summary: "Wait for a command to be ready.", flags: ["-p", "--project", "-w", "--workspace", "--timeout", "--log"] },
   { name: "tailscale", summary: "Set up private tailnet previews.", flags: ["--domain", "-y", "--yes"] },
@@ -28,7 +28,7 @@ export const commandSpecs = [
   { name: "docs", summary: "Show built-in reference docs.", flags: [] },
   { name: "completions", summary: "Print shell completion script.", flags: [] },
   { name: "shell-init", summary: "Print shell init (completion + cd wrapper).", flags: [] },
-  { name: "cd", summary: "Print workspace root for shell cd.", flags: [] },
+  { name: "cd", summary: "Print workspace root for shell cd.", flags: ["-w", "--workspace"] },
 ] as const satisfies ReadonlyArray<CommandSpec>
 
 export type CommandName = (typeof commandSpecs)[number]["name"]

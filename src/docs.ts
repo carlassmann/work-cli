@@ -397,7 +397,9 @@ Run:
   work up --cloudflare
 
 An active Cloudflare workspace keeps that mode for later work run, restart, and
-up calls. Run work down before switching it back to local mode.
+up calls. Switch modes with --switch (work up --local --switch), which stops the
+workspace and starts its live commands again in the new mode; without --switch
+work refuses, so a workspace that CI or another agent runs is not stopped by accident.
 
 Use a single hostname label directly below the Cloudflare zone so Universal SSL
 covers it. In WorkOS, allow https://*.example.com and the required callback path.`,
@@ -429,7 +431,9 @@ work starts a small HTTPS proxy on 127.0.0.1 and points tailscale serve's TCP
 port 443 at it, so no root is needed. The proxy sends each request through the
 command's local Portless URL with X-Forwarded-Host and X-Forwarded-Proto set to
 the public origin. When the last Tailscale command stops, work stops the proxy
-and removes the port 443 forward.
+and removes the port 443 forward. A forward to a local port nothing listens on
+is taken over. When another tailscale serve handler holds port 443, work names it
+and prints the commands that move it to port 8443.
 
 WORK_URL and the other WORK_*_URL variables use the tailnet URLs, like
 --cloudflare. The domain resolves to this machine's tailnet address, which
@@ -442,7 +446,9 @@ settings, setup prints the command instead of running it. Without it, use the
 *.localhost URLs here.
 
 An active Tailscale workspace keeps that mode for later work run, restart, and
-up calls. Run work down before switching it back to local mode.
+up calls. Switch modes with --switch (work up --local --switch), which stops the
+workspace and starts its live commands again in the new mode; without --switch
+work refuses, so a workspace that CI or another agent runs is not stopped by accident.
 
 In WorkOS or other OAuth providers, allow https://*.dev.example.com and the
 callback path.`,

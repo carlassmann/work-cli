@@ -8,7 +8,7 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
-import { parseServeTarget, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
+import { parseServeTarget, serveConflictMessage, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -69,6 +69,24 @@ describe("tailscale", () => {
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "8443": { HTTPS: true } } })), null)
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:47443" } } })), "127.0.0.1:47443")
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { HTTPS: true } } })), "another tailscale serve handler")
+  })
+
+  test("a port 443 conflict names the handler and the commands that free it", () => {
+    const https = JSON.stringify({
+      TCP: { "443": { HTTPS: true } },
+      Web: {
+        "box.tail1.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3000" }, "/docs": { Path: "/srv/docs" } } },
+        "box.tail1.ts.net:8443": { Handlers: { "/": { Proxy: "http://127.0.0.1:9000" } } },
+      },
+    })
+    const message = serveConflictMessage(https, "127.0.0.1:47443")
+    assert.match(message, /uses tailnet port 443 for \/ -> http:\/\/127\.0\.0\.1:3000, \/docs -> \/srv\/docs;/)
+    assert.match(message, /tailscale serve --https=443 off && tailscale serve --bg --https=8443 http:\/\/127\.0\.0\.1:3000 && tailscale serve --bg --https=8443 --set-path=\/docs \/srv\/docs/)
+    assert.doesNotMatch(message, /9000/)
+
+    const forward = serveConflictMessage(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:5000" } } }), "127.0.0.1:47443")
+    assert.match(forward, /forwards tailnet port 443 to 127\.0\.0\.1:5000, which is in use/)
+    assert.match(forward, /tailscale serve --tcp=443 off/)
   })
 
   test("proxy hands requests and WebSocket upgrades to the local URL with the public origin", async (t) => {

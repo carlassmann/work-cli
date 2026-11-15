@@ -1,10 +1,12 @@
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, test } from "node:test"
 import assert from "node:assert/strict"
 import { syncCloudflareTunnel } from "./cloudflare.js"
 import { commandRuntimeStatus, pruneDeadCommands, restartTrackedCommand, startCommand, startupExits, stopCommand } from "./processes.js"
 import { currentRunOffset } from "./logs.js"
+import { deadReason } from "./dead-reason.js"
 import { commandLogFile, listWorkspaceStates, readWorkspaceState, writeWorkspaceState } from "./state.js"
 import { isPidRunning } from "./shell.js"
 import { tempDir } from "./test-helpers.js"
@@ -627,6 +629,46 @@ while :; do sleep 1; done
     await readSoonMatch(started.value.record.log, /code=3[\s\S]*code=3/)
     assert.deepEqual(await pruneDeadCommands(), { ok: true, value: 1 })
     assert.deepEqual((await listWorkspaceStates())[0]?.commands, {})
+  })
+
+  test("records why a command died when no exit status was observed", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const record = (id: string, startedAt: string) => ({
+      id, label: id, command: id, run: id, route: null, cwd: root, log: path.join(root, `${id}.log`), url: null, startedAt, pid: 99999999,
+    })
+    const beforeBoot = new Date(Date.now() - os.uptime() * 1000 - 60_000).toISOString()
+    assert.equal((await writeWorkspaceState({
+      ...testWorkspace(root),
+      commands: { old: record("old", beforeBoot), recent: record("recent", new Date().toISOString()) },
+    })).ok, true)
+
+    assert.deepEqual(await pruneDeadCommands(process.env, undefined, undefined, { keepDead: true }), { ok: true, value: 0 })
+    const state = await readWorkspaceState("tilly", "feature-x")
+    const commands = state.ok ? state.value?.commands : undefined
+    assert.equal(commands?.["old"]?.stopReason, "reboot")
+    assert.equal(commands?.["recent"]?.stopReason, "lost")
+    assert.equal(deadReason(commands!["recent"]!)?.label, "exit unknown")
+    assert.match(deadReason(commands!["old"]!)?.text ?? "", /^gone after a machine reboot/)
+  })
+
+  test("TTL expiry keeps the record with its cause until the next start", async () => {
+    const root = await tempDir()
+    process.env["WORK_STATE_ROOT"] = await tempDir("work-cli-state-")
+    const started = await startCommand(testConfig("exec sleep 30"), testWorkspace(root), "web", { mode: "local" }, { ...process.env, WORK_MAX_TTL_SECONDS: "3600" })
+    assert.ok(started.ok)
+    if (!started.ok) return
+    assert.equal((await stopCommand("tilly", "feature-x", "web", { ttlExpired: true })).ok, true)
+    const stopped = await readWorkspaceState("tilly", "feature-x")
+    const record = stopped.ok ? stopped.value?.commands["web"] : undefined
+    assert.equal(record?.stopReason, "ttl")
+    assert.equal(await commandRuntimeStatus(record!), "dead")
+    assert.equal(deadReason(record!)?.label, "ttl 1h")
+
+    const restarted = await restartTrackedCommand("tilly", "feature-x", "web")
+    assert.ok(restarted.ok)
+    if (restarted.ok) assert.equal(restarted.value.record.stopReason, undefined)
+    await stopCommand("tilly", "feature-x", "web")
   })
 
   test("drops dead records when their worktree is gone", async () => {

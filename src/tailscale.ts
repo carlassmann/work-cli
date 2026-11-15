@@ -1,5 +1,6 @@
 import fs from "node:fs"
 import fsp from "node:fs/promises"
+import net from "node:net"
 import path from "node:path"
 import { execFile, spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
@@ -171,13 +172,39 @@ async function isActiveTailscaleRecord(record: CommandRecord) {
 
 // tailscale serve owns port 443 on the tailnet address, so work does not need root
 // to listen there. It forwards raw TCP, which keeps TLS and Host routing in the proxy.
+// Checked before anything stops or starts, so a held port 443 fails the command up front.
+export async function checkServePort(port: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
+  if (!await commandExists("tailscale", environment)) return ok(undefined)
+  const status = await serveStatus(environment)
+  if (!status.ok) return status
+  const holder = await serveHolder(status.value, port)
+  return holder === "foreign" ? errResult("ConfigError", serveConflictMessage(status.value, `127.0.0.1:${port}`)) : ok(undefined)
+}
+
+// A forward to a local port nobody listens on is left over from an earlier proxy (another
+// WORK_TAILSCALE_PORT or a crashed run); nothing can depend on it, so work takes it over.
+async function serveHolder(output: string, port: number): Promise<"none" | "ours" | "stale" | "foreign"> {
+  const current = parseServeTarget(output)
+  if (!current) return "none"
+  if (current === `127.0.0.1:${port}`) return "ours"
+  const forwardPort = /^(?:127\.0\.0\.1|localhost):(\d+)$/.exec(current)?.[1]
+  return forwardPort && !await isPortListening(Number(forwardPort)) ? "stale" : "foreign"
+}
+
 async function ensureServe(port: number, environment: NodeJS.ProcessEnv): Promise<Result<void>> {
-  const current = await serveTarget(environment)
-  if (!current.ok) return current
+  const status = await serveStatus(environment)
+  if (!status.ok) return status
+  const current = parseServeTarget(status.value)
   const target = `127.0.0.1:${port}`
-  if (current.value === target) return ok(undefined)
-  if (current.value) {
-    return errResult("ConfigError", `tailscale serve already forwards port 443 to ${current.value}. Remove it with: tailscale serve --tcp=443 off`)
+  const holder = await serveHolder(status.value, port)
+  if (holder === "ours") return ok(undefined)
+  if (holder === "foreign") return errResult("ConfigError", serveConflictMessage(status.value, target))
+  if (holder === "stale") {
+    try {
+      await exec("tailscale", ["serve", `--tcp=${SERVE_PORT}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
+    } catch (cause) {
+      return errResult("ProcessError", `failed to remove the stale tailnet forward to ${current}: ${commandError(cause)}`)
+    }
   }
 
   try {
@@ -202,13 +229,57 @@ async function removeServe(port: number, environment: NodeJS.ProcessEnv): Promis
 }
 
 async function serveTarget(environment: NodeJS.ProcessEnv): Promise<Result<string | null>> {
-  let output: string
+  const status = await serveStatus(environment)
+  return status.ok ? ok(parseServeTarget(status.value)) : status
+}
+
+async function serveStatus(environment: NodeJS.ProcessEnv): Promise<Result<string>> {
   try {
-    output = (await exec("tailscale", ["serve", "status", "--json"], { env: childEnvironment(environment), timeout: 30_000 })).stdout
+    return ok((await exec("tailscale", ["serve", "status", "--json"], { env: childEnvironment(environment), timeout: 30_000 })).stdout)
   } catch (cause) {
     return errResult("ProcessError", `failed to read tailscale serve status: ${commandError(cause)}`)
   }
-  return ok(parseServeTarget(output))
+}
+
+function isPortListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port, timeout: 1000 })
+    const done = (listening: boolean) => {
+      socket.destroy()
+      resolve(listening)
+    }
+    socket.once("connect", () => done(true))
+    socket.once("error", () => done(false))
+    socket.once("timeout", () => done(false))
+  })
+}
+
+// Names the handler that holds port 443 and the exact commands to free it, since work needs raw TCP there.
+export function serveConflictMessage(output: string, target: string): string {
+  const current = parseServeTarget(output)
+  if (current && current !== "another tailscale serve handler") {
+    return `tailscale serve already forwards tailnet port 443 to ${current}, which is in use, so work cannot point it at its proxy (${target}).\n` +
+      `If that forward is yours, move it to another port; otherwise free 443 with: tailscale serve --tcp=443 off\nThen rerun this command.`
+  }
+  const handlers = webHandlers(output)
+  const described = handlers.length > 0 ? handlers.map(({ path, proxy }) => `${path} -> ${proxy}`).join(", ") : "an HTTPS handler"
+  const move = handlers.length > 0
+    ? handlers.map(({ path, proxy }) => `tailscale serve --bg --https=8443${path === "/" ? "" : ` --set-path=${path}`} ${proxy}`).join(" && ")
+    : "tailscale serve --bg --https=8443 <target>"
+  return `tailscale serve already uses tailnet port 443 for ${described}; work needs raw TCP on 443 for its proxy (${target}).\n` +
+    `Move that handler to port 8443: tailscale serve --https=443 off && ${move}\nThen rerun this command.`
+}
+
+function webHandlers(output: string): Array<{ path: string; proxy: string }> {
+  try {
+    const web = (JSON.parse(output || "{}") as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: unknown; Path?: unknown; Text?: unknown }> }> }).Web ?? {}
+    return Object.entries(web)
+      .filter(([host]) => host.endsWith(`:${SERVE_PORT}`))
+      .flatMap(([, config]) => Object.entries(config.Handlers ?? {}))
+      .map(([path, handler]) => ({ path, proxy: typeof handler.Proxy === "string" ? handler.Proxy : typeof handler.Path === "string" ? handler.Path : "a static handler" }))
+  } catch {
+    return []
+  }
 }
 
 export function parseServeTarget(output: string): string | null {

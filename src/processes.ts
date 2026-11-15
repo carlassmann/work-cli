@@ -1,5 +1,6 @@
 import fs from "node:fs"
 import fsp from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
@@ -62,12 +63,12 @@ export async function startCommand(
   const hasLiveCommand = commandStatuses.includes("up")
 
   if (hasLiveCommand && stateMode !== exposure.mode) {
-    return errResult("ProcessError", `workspace ${workspace.workspace} is already running in ${stateMode} mode. Run work down ${workspace.workspace} before switching.`)
+    return errResult("ProcessError", `workspace ${workspace.workspace} is already running in ${stateMode} mode. Rerun with --switch to restart it in ${exposure.mode} mode, or run work down ${workspace.workspace} first.`)
   }
 
   if (existing && await commandRuntimeStatus(existing) === "up") {
     if ((existing.exposure?.mode ?? "local") !== exposure.mode) {
-      return errResult("ProcessError", `command ${id} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${workspace.workspace} before switching.`)
+      return errResult("ProcessError", `command ${id} is tracked in ${existing.exposure?.mode ?? "local"} mode. Rerun with --switch to restart it in ${exposure.mode} mode, or run work down ${workspace.workspace} first.`)
     }
     return ok({ record: existing, started: false })
   }
@@ -250,7 +251,7 @@ export async function stopCommand(
   project: string,
   workspace: string,
   id: string,
-  options: { syncExposures?: boolean; environment?: NodeJS.ProcessEnv; idleSeconds?: number } = {},
+  options: { syncExposures?: boolean; environment?: NodeJS.ProcessEnv; idleSeconds?: number; ttlExpired?: boolean } = {},
 ): Promise<Result<boolean>> {
   const stateResult = await readWorkspaceState(project, workspace)
   if (!stateResult.ok) return stateResult
@@ -268,6 +269,10 @@ export async function stopCommand(
     command.idleStoppedAt = new Date().toISOString()
     command.exitedAt ??= command.idleStoppedAt
     command.idleStoppedSeconds = options.idleSeconds
+  } else if (options.ttlExpired) {
+    // Kept like idle stops, so ps and wait can say why the command is gone.
+    command.exitedAt ??= new Date().toISOString()
+    command.stopReason = "ttl"
   } else {
     delete state.commands[id]
   }
@@ -385,6 +390,7 @@ export async function restartTrackedCommand(
   delete record.exitedAt
   delete record.exitCode
   delete record.exitSignal
+  delete record.stopReason
   if (ttl.value > 0) {
     record.maxTtlSeconds = ttl.value
     record.ttlStartedAt = preserveTtl ? command.ttlStartedAt ?? command.startedAt : record.startedAt
@@ -544,6 +550,12 @@ function markExited(command: CommandRecord, exit: CommandExit | undefined) {
   command.exitedAt = exit?.at ?? new Date().toISOString()
   if (typeof exit?.code === "number") command.exitCode = exit.code
   if (exit?.signal) command.exitSignal = exit.signal
+  // Only the workd that spawned a command sees its exit status; otherwise say what is known about the death.
+  if (!exit) command.stopReason = Date.parse(command.startedAt) < bootTime() ? "reboot" : "lost"
+}
+
+function bootTime() {
+  return Date.now() - os.uptime() * 1000
 }
 
 function clearEmptyWorkspaceExposure(state: WorkspaceState) {

@@ -11,6 +11,7 @@ import { commandRuntimeStatus } from "./processes.js"
 import { isPidRunning } from "./shell.js"
 import { processUnit, sessionScope, systemdUserManagerAvailable, workdUnitName } from "./systemd.js"
 import { tempDir } from "./test-helpers.js"
+import type { CommandRecord } from "./types.js"
 
 const execFileAsync = promisify(execFile)
 const previousStateRoot = process.env["WORK_STATE_ROOT"]
@@ -135,7 +136,7 @@ describe("daemon client", () => {
       state.value.commands["web"]!.ttlStartedAt = new Date(Date.now() - 61_000).toISOString()
       assert.equal((await writeWorkspaceState(state.value)).ok, true)
       assert.equal((await ensureDaemon()).ok, true)
-      await waitForEmptyWorkspace("demo", "main")
+      await waitForTtlStopped("demo", "main")
       assert.equal(await fs.readFile(counter, "utf8"), "started\n")
     } finally {
       await callDaemon({ type: "down", project: "demo", workspace: "main", environment })
@@ -154,7 +155,7 @@ describe("daemon client", () => {
     assert.ok(started.ok)
     if (!started.ok) return
     try {
-      await waitForEmptyWorkspace("demo", "main")
+      await waitForTtlStopped("demo", "main")
       const childPid = Number(await fs.readFile(childFile, "utf8"))
       const deadline = Date.now() + 2000
       while (isPidRunning(childPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
@@ -230,21 +231,22 @@ describe("daemon client", () => {
       assert.equal(recovered.ok ? recovered.value?.commands["web"]?.ttlStartedAt : undefined, started.value.data.record.ttlStartedAt)
 
       const deadline = Date.now() + 9000
-      let remaining: number | undefined
+      let expired = false
       while (Date.now() < deadline) {
         const current = await readWorkspaceState("demo", "main")
-        remaining = current.ok ? Object.keys(current.value?.commands ?? {}).length : undefined
-        if (remaining === 0) break
+        expired = current.ok && Boolean(current.value) && allTtlStopped(current.value!.commands)
+        if (expired) break
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
-      assert.equal(remaining, 0)
+      assert.equal(expired, true)
       if (restarted) assert.equal(await commandRuntimeStatus(restarted), "dead")
       if (worker.ok) assert.equal(await commandRuntimeStatus(worker.value.data.record), "dead")
       if (unlimited.ok) assert.equal(await commandRuntimeStatus(unlimited.value.data.record), "up")
       await new Promise((resolve) => setTimeout(resolve, 1100))
       assert.equal(await fs.readFile(counter, "utf8"), "2")
       const afterExpiry = await readWorkspaceState("demo", "main")
-      assert.deepEqual(afterExpiry.ok ? afterExpiry.value?.commands : undefined, {})
+      assert.deepEqual(Object.keys(afterExpiry.ok ? afterExpiry.value?.commands ?? {} : {}).sort(), ["web", "worker"])
+      assert.equal(afterExpiry.ok && allTtlStopped(afterExpiry.value!.commands), true)
     } finally {
       for (const name of ["main", "unlimited"]) {
         await callDaemon({ type: "down", project: "demo", workspace: name, environment })
@@ -276,7 +278,7 @@ describe("daemon client", () => {
       if (!record) return
       assert.equal(await commandRuntimeStatus(record), "up")
       assert.ok(Date.parse(record.ttlStartedAt ?? "") > Date.parse(started.value.data.record.ttlStartedAt ?? ""))
-      await waitForEmptyWorkspace("demo", "main")
+      await waitForTtlStopped("demo", "main")
       assert.equal(await commandRuntimeStatus(record), "dead")
     } finally {
       if (previousInterval === undefined) delete process.env["WORK_ACTIVITY_CHECK_INTERVAL_MS"]
@@ -568,12 +570,17 @@ async function waitForValue(file: string, expected: string) {
   assert.equal(await fs.readFile(file, "utf8").catch(() => ""), expected)
 }
 
-async function waitForEmptyWorkspace(project: string, workspace: string) {
+// Expired records stay, marked with their cause, so ps and wait can explain them.
+async function waitForTtlStopped(project: string, workspace: string) {
   const deadline = Date.now() + 5000
   while (Date.now() < deadline) {
     const state = await readWorkspaceState(project, workspace)
-    if (state.ok && state.value && Object.keys(state.value.commands).length === 0) return
+    if (state.ok && state.value && allTtlStopped(state.value.commands)) return
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
-  assert.fail(`commands still tracked for ${project}/${workspace}`)
+  assert.fail(`commands still running for ${project}/${workspace}`)
+}
+
+function allTtlStopped(commands: Record<string, CommandRecord>) {
+  return Object.values(commands).every((record) => record.stopReason === "ttl" && record.exitedAt)
 }
