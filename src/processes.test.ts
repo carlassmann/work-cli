@@ -650,6 +650,10 @@ while :; do sleep 1; done
     assert.equal(commands?.["recent"]?.stopReason, "lost")
     assert.equal(deadReason(commands!["recent"]!)?.label, "exit unknown")
     assert.match(deadReason(commands!["old"]!)?.text ?? "", /^gone after a machine reboot/)
+    // Records an older workd marked dead without a cause still read as reboots when they died across one.
+    const legacy = { ...commands!["old"]!, stopReason: undefined }
+    assert.equal(deadReason(legacy)?.label, "reboot")
+    assert.equal(deadReason({ ...legacy, exitedAt: beforeBoot }), null)
   })
 
   test("TTL expiry keeps the record with its cause until the next start", async () => {
