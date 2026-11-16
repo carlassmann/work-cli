@@ -698,6 +698,37 @@ describe("cli", () => {
     }
   })
 
+  test("a mode switch validates before stopping and works without autoStart commands", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const live = spawn("sleep", ["60"], { stdio: "ignore", detached: true })
+    t.after(() => { try { process.kill(-live.pid!, "SIGKILL") } catch {} })
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { preview: { run: "exec sleep 30" } } }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root,
+      exposure: { mode: "tailscale", domain: "dev.example.com", certFile: "cert", keyFile: "key", port: 47443 },
+      commands: { preview: {
+        id: "preview", label: "preview", command: "preview", run: "exec sleep 30", route: null, cwd: root,
+        log: path.join(root, "preview.log"), url: null, startedAt: new Date().toISOString(), pid: live.pid!,
+      } },
+    }))
+
+    const invalid = await runCli(["up", "--local", "--switch"], { cwd: root, stateRoot, env: { WORK_MAX_TTL_SECONDS: "invalid" } })
+    assert.equal(invalid.exitCode, 1)
+    assert.match(invalid.stderr, /WORK_MAX_TTL_SECONDS/)
+    assert.doesNotThrow(() => process.kill(live.pid!, 0))
+
+    const switched = await runCli(["up", "--local", "--switch"], { cwd: root, stateRoot })
+    try {
+      assert.equal(switched.exitCode, 0, switched.stderr)
+      assert.match(switched.stdout, /^switching main from tailscale to local mode\nstopped tilly\/main\/preview\n/)
+      assert.match(switched.stdout, /^started preview pid=\d+$/m)
+    } finally {
+      await runCli(["down"], { cwd: root, stateRoot })
+    }
+  })
+
   test("wait matches a log line from the current run", async (t) => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")

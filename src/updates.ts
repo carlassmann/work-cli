@@ -10,6 +10,7 @@ import { stateRoot } from "./state.js"
 const repository = "https://github.com/carlassmann/work-cli"
 const api = "https://api.github.com/repos/carlassmann/work-cli"
 const checkIntervalMs = 3_600_000
+const noticeLockStaleMs = 10_000
 const noticeIntervalMs = 24 * checkIntervalMs
 const commitPattern = /^[a-f0-9]{40}$/
 const statuses = ["current", "available", "ahead", "diverged", "unknown"] as const
@@ -185,18 +186,43 @@ export async function takeUpdateNotice(commit: string | null = buildCommit, now 
   if (process.env["WORK_NO_UPDATE_CHECK"] === "1") return null
   const status = await readUpdateStatus(commit)
   if (status?.status !== "available" || !status.latestCommit) return null
+  // Agents run many work commands in parallel; the lock lets exactly one of them show the notice.
+  const release = await claimNoticeLock()
+  if (!release) return null
   try {
-    const shown = JSON.parse(await fs.readFile(noticeFile(), "utf8")) as { latestCommit?: unknown; shownAt?: unknown }
-    if (shown.latestCommit === status.latestCommit && typeof shown.shownAt === "string" && now - Date.parse(shown.shownAt) < noticeIntervalMs) return null
-  } catch {
-    // no notice shown yet
-  }
-  try {
+    if (await noticeShownRecently(status.latestCommit, now)) return null
     await fs.writeFile(noticeFile(), `${JSON.stringify({ latestCommit: status.latestCommit, shownAt: new Date(now).toISOString() })}\n`, { mode: 0o600 })
   } catch {
     return null
+  } finally {
+    await release()
   }
   return availableUpdateLine(status)
+}
+
+async function noticeShownRecently(latestCommit: string, now: number) {
+  try {
+    const shown = JSON.parse(await fs.readFile(noticeFile(), "utf8")) as { latestCommit?: unknown; shownAt?: unknown }
+    return shown.latestCommit === latestCommit && typeof shown.shownAt === "string" && now - Date.parse(shown.shownAt) < noticeIntervalMs
+  } catch {
+    return false
+  }
+}
+
+async function claimNoticeLock(): Promise<(() => Promise<void>) | null> {
+  const lock = `${noticeFile()}.lock`
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await (await fs.open(lock, "wx", 0o600)).close()
+      return () => fs.rm(lock, { force: true })
+    } catch {
+      // A crashed command must not suppress the notice forever.
+      const stat = await fs.stat(lock).catch(() => null)
+      if (!stat || Date.now() - stat.mtimeMs < noticeLockStaleMs) return null
+      await fs.rm(lock, { force: true })
+    }
+  }
+  return null
 }
 
 export async function outdatedBuildHint(commit: string | null = buildCommit): Promise<string | null> {

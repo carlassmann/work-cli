@@ -191,6 +191,12 @@ describe("updates", () => {
     assert.equal(await outdatedBuildHint(installed), null)
   })
 
+  test("parallel commands show the notice once", async () => {
+    await checkForUpdates(installed, availableFetcher(latest))
+    const notices = await Promise.all(Array.from({ length: 20 }, () => takeUpdateNotice(installed)))
+    assert.equal(notices.filter(Boolean).length, 1)
+  })
+
   test("no notice when current, unknown, or for another build", async () => {
     assert.equal(await takeUpdateNotice(installed), null)
     await checkForUpdates(installed, async () => Response.json({ sha: installed }))

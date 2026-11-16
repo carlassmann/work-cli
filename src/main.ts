@@ -11,7 +11,7 @@ import { runTailscaleSetup, tailscaleDoctorLine } from "./tailscale-setup.js"
 import { buildCommit, buildDirty } from "./build-info.js"
 import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
-import { createConfig, loadConfig } from "./config.js"
+import { createConfig, loadConfig, resolveIdleTimeoutSeconds, resolveMaxTtlSeconds } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
 import { commandRuntimeStatus, startupExits } from "./processes.js"
@@ -293,7 +293,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
     if (!exposure.ok) return exposure
   }
 
-  if (commands.length === 0) {
+  if (commands.length === 0 && !parsed.value.flags.switch) {
     console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
     return ok(undefined)
   }
@@ -461,7 +461,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (all) {
     const autoStart = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
 
-    if (autoStart.length === 0) {
+    if (autoStart.length === 0 && !parsed.value.flags.switch) {
       console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
       return ok(undefined)
     }
@@ -494,18 +494,32 @@ async function startConfigured(
   environment: NodeJS.ProcessEnv,
   switchMode = false,
 ): Promise<Result<void>> {
+  const plan = switchMode ? await planModeSwitch(ctx, workspace, exposure, entries) : ok({ from: null, entries })
+  if (!plan.ok) return plan
+  entries = plan.value.entries
+  if (entries.length === 0) {
+    console.log(`nothing to start in ${workspace.workspace}`)
+    return ok(undefined)
+  }
+
+  // Everything that can fail runs before a mode switch stops the running commands.
+  const timeouts = await validateTimeouts(ctx.config)
+  if (!timeouts.ok) return timeouts
   if (exposure.mode === "tailscale" && entries.some(([, command]) => command.route)) {
     const serve = await checkServePort(exposure.port, environment)
     if (!serve.ok) return serve
   }
-  const switched = switchMode ? await stopForModeSwitch(ctx, workspace, exposure, entries) : ok(entries)
-  if (!switched.ok) return switched
-  entries = switched.value
   const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
   const routed = entries.filter(([, command]) => usesPortless(command))
   const proxy = await ensurePortlessProxy(await portlessEndpoints({ ...ctx.config.env, ...environment }, Object.fromEntries(routed.map(([id, command]) => [id, command.env]))))
   if (!proxy.ok) return proxy
+
+  if (plan.value.from) {
+    console.log(`switching ${workspace.workspace} from ${plan.value.from} to ${exposure.mode} mode`)
+    const stopped = await downStates([{ project: ctx.config.project, workspace: workspace.workspace }])
+    if (!stopped.ok) return stopped
+  }
 
   const previous = await readWorkspaceState(ctx.config.project, workspace.workspace)
   for (const [id] of entries) {
@@ -540,28 +554,31 @@ type TrackedTarget = { project: string; workspace: string; command: string }
 
 // Only on explicit --switch: stopping a workspace someone else (often CI) runs in another mode must be a deliberate choice.
 // Commands that were live before the switch start again in the new mode.
-async function stopForModeSwitch(
+async function planModeSwitch(
   ctx: ProjectContext,
   workspace: WorkspaceRecord,
   exposure: Exposure,
   entries: Array<[string, DevConfig["commands"][string]]>,
-): Promise<Result<Array<[string, DevConfig["commands"][string]]>>> {
+): Promise<Result<{ from: string | null; entries: Array<[string, DevConfig["commands"][string]]> }>> {
   const state = await readWorkspaceState(ctx.config.project, workspace.workspace)
   if (!state.ok) return state
-  const records = Object.values(state.value?.commands ?? {})
   const live = []
-  for (const record of records) if (await commandRuntimeStatus(record) === "up") live.push(record)
+  for (const record of Object.values(state.value?.commands ?? {})) if (await commandRuntimeStatus(record) === "up") live.push(record)
   const liveMode = state.value?.exposure?.mode ?? "local"
-  if (live.length === 0 || liveMode === exposure.mode) return ok(entries)
+  if (live.length === 0 || liveMode === exposure.mode) return ok({ from: null, entries })
 
-  console.log(`switching ${workspace.workspace} from ${liveMode} to ${exposure.mode} mode`)
-  const stopped = await downStates([{ project: ctx.config.project, workspace: workspace.workspace }])
-  if (!stopped.ok) return stopped
   const requested = new Set(entries.map(([id]) => id))
   const restarted = live
     .filter((record) => !requested.has(record.id) && ctx.config.commands[record.id])
     .map((record): [string, DevConfig["commands"][string]] => [record.id, ctx.config.commands[record.id]!])
-  return ok([...entries, ...restarted])
+  return ok({ from: liveMode, entries: [...entries, ...restarted] })
+}
+
+async function validateTimeouts(config: DevConfig): Promise<Result<void>> {
+  const ttl = await resolveMaxTtlSeconds(config, process.env)
+  if (!ttl.ok) return ttl
+  const idle = await resolveIdleTimeoutSeconds(config, process.env)
+  return idle.ok ? ok(undefined) : idle
 }
 
 async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Result<void>> {
