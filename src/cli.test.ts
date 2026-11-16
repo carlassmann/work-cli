@@ -427,8 +427,8 @@ describe("cli", () => {
     assert.equal(ps.exitCode, 0)
     assert.equal(ps.stderr, "")
     assert.deepEqual(JSON.parse(ps.stdout), [
-      { project: "tilly", workspace: "main", command: "web", status: "up", pid, url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: null },
-      { project: "tilly", workspace: "main", command: "worker", status: "up", pid, url: null, exitCode: null, exitSignal: null, exitedAt: null },
+      { project: "tilly", workspace: "main", command: "web", status: "up", mode: "local", pid, url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: null, reason: null, reasonText: null },
+      { project: "tilly", workspace: "main", command: "worker", status: "up", mode: "local", pid, url: null, exitCode: null, exitSignal: null, exitedAt: null, reason: null, reasonText: null },
     ])
 
     const urls = await runCli(["urls", "--json"], { cwd: root, stateRoot })
@@ -510,12 +510,13 @@ describe("cli", () => {
 
     const ps = await runCli(["ps"], { cwd: root, stateRoot, env })
     assert.equal(ps.exitCode, 0)
-    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+local\s+99999999/m)
 
-    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot })
+    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot, env })
     assert.deepEqual(JSON.parse(json.stdout), [{
-      project: "tilly", workspace: "main", command: "web", status: "dead", pid: 99999999,
+      project: "tilly", workspace: "main", command: "web", status: "dead", mode: "local", pid: 99999999,
       url: "https://web-main-tilly.localhost", exitCode: 1, exitSignal: null, exitedAt: exitedAt.toISOString(),
+      reason: "exit", reasonText: "dead after exiting with code 1 at 12:04:31",
     }])
 
     const urls = await runCli(["urls"], { cwd: root, stateRoot })
@@ -547,13 +548,13 @@ describe("cli", () => {
 
     const ps = await runCli(["ps"], { cwd: root, stateRoot, env })
     assert.equal(ps.exitCode, 0)
-    assert.match(ps.stdout, /^stopped \(idle 2h, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+    assert.match(ps.stdout, /^stopped \(idle 2h, 12:04:31\)\s+tilly\/main\s+web\s+local\s+99999999/m)
 
-    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot })
+    const json = await runCli(["ps", "--json"], { cwd: root, stateRoot, env })
     assert.deepEqual(JSON.parse(json.stdout), [{
-      project: "tilly", workspace: "main", command: "web", status: "dead", pid: 99999999,
+      project: "tilly", workspace: "main", command: "web", status: "dead", mode: "local", pid: 99999999,
       url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: exitedAt.toISOString(),
-      idleStoppedAt: exitedAt.toISOString(), idleStoppedSeconds: 7200,
+      reason: "idle", reasonText: "stopped at 12:04:31 after 2h without traffic (idleTimeoutSeconds)", idleStoppedAt: exitedAt.toISOString(), idleStoppedSeconds: 7200,
     }])
 
     const urls = await runCli(["urls"], { cwd: root, stateRoot })
@@ -576,7 +577,167 @@ describe("cli", () => {
     }))
     const ps = await runCli(["ps", "--all"], { cwd: root, stateRoot, env: { TZ: "UTC" } })
     assert.equal(ps.exitCode, 0)
-    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+99999999/m)
+    assert.match(ps.stdout, /^dead \(exit 1, 12:04:31\)\s+tilly\/main\s+web\s+local\s+99999999/m)
+  })
+
+  test("accepts common guesses: ls/list, -w on workspace commands, -C, and urls mode flags", async () => {
+    const root = await tempDir()
+    const outside = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { preview: { run: "x" } } }`)
+    const realRoot = await fs.realpath(root)
+
+    for (const alias of ["ls", "list"]) {
+      const listed = await runCli([alias], { cwd: root, stateRoot })
+      assert.equal(listed.exitCode, 0, listed.stderr)
+      assert.match(listed.stdout, /no tracked commands for tilly\/main/)
+    }
+
+    const cd = await runCli(["cd", "-w", "main"], { cwd: root, stateRoot })
+    assert.equal(cd.stdout, `${realRoot}\n`)
+    const fromOutside = await runCli(["-C", root, "cd"], { cwd: outside, stateRoot })
+    assert.equal(fromOutside.stdout, `${realRoot}\n`)
+    const cwdFlag = await runCli(["cd", `--cwd=${root}`], { cwd: outside, stateRoot })
+    assert.equal(cwdFlag.stdout, `${realRoot}\n`)
+    const urls = await runCli(["urls", "-w", "main", "--tailscale"], { cwd: root, stateRoot })
+    assert.equal(urls.exitCode, 0, urls.stderr)
+    assert.equal(urls.stdout, "no routed commands for tilly/main\n")
+    const down = await runCli(["down", "-w", "main"], { cwd: root, stateRoot })
+    assert.equal(down.exitCode, 0, down.stderr)
+    const both = await runCli(["down", "-w", "main", "other"], { cwd: root, stateRoot })
+    assert.match(both.stderr, /unexpected argument: other \(-w already names the workspace\)/)
+  })
+
+  test("points work up <command> to work run, and work run <script> to running it directly", async () => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { web: { run: "x" }, preview: { run: "y" } } }`)
+
+    const up = await runCli(["up", "preview"], { cwd: root, stateRoot })
+    assert.equal(up.exitCode, 1)
+    assert.match(up.stderr, /preview is a command in work\.config\.js, not a workspace\. Did you mean: work run preview\?/)
+
+    const run = await runCli(["run", "./script.ts"], { cwd: root, stateRoot })
+    assert.equal(run.exitCode, 1)
+    assert.match(run.stderr, /unknown command: \.\/script\.ts\nwork run starts a command from work\.config\.js \(web, preview\); run scripts directly\./)
+  })
+
+  test("wait explains an untracked or stopped command", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" })
+    t.after(() => sleeper.kill())
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    const statePath = path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json")
+    const record = (id: string, extra: object) => ({
+      id, label: id, command: id, run: id, route: null, cwd: root, log: path.join(root, `${id}.log`), url: null,
+      startedAt: new Date().toISOString(), pid: sleeper.pid!, ...extra,
+    })
+
+    const empty = await runCli(["wait", "web"], { cwd: root, stateRoot })
+    assert.match(empty.stderr, /no tracked command: main\/web\. Nothing runs in main; start it with: work up main/)
+
+    await writeFile(statePath, JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root, exposure: { mode: "local" },
+      commands: {
+        convex: record("convex", {}),
+        api: record("api", { pid: 99999999, exitedAt: new Date().toISOString(), stopReason: "ttl", maxTtlSeconds: 3600, restart: "on-exit" }),
+      },
+    }))
+    const otherMode = await runCli(["wait", "web"], { cwd: root, stateRoot })
+    assert.equal(otherMode.exitCode, 1)
+    assert.match(otherMode.stderr, /main runs convex in local mode; work up\/run\/restart with another mode flag is refused while it runs\. Rerun that command with --switch/)
+
+    const ttl = await runCli(["wait", "api"], { cwd: root, stateRoot })
+    assert.equal(ttl.exitCode, 1)
+    assert.match(ttl.stderr, /main\/api was stopped at .* after 1h without worktree changes \(maxTtlSeconds\)\. Start it again: work up main/)
+
+    const ps = await runCli(["ps"], { cwd: root, stateRoot })
+    assert.match(ps.stdout, /^stopped \(ttl 1h, .*\)\s+tilly\/main\s+api\s+local/m)
+  })
+
+  test("a mode switch needs --switch and then restarts what was live", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    // Detached like workd's own children, so stopping its process group cannot reach the test runner.
+    const live = spawn("sleep", ["60"], { stdio: "ignore", detached: true })
+    t.after(() => { try { process.kill(-live.pid!, "SIGKILL") } catch {} })
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {
+      web: { run: "exec sleep 30", autoStart: true },
+      preview: { run: "exec sleep 30" },
+    } }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root,
+      exposure: { mode: "tailscale", domain: "dev.example.com", certFile: "cert", keyFile: "key", port: 47443 },
+      commands: { preview: {
+        id: "preview", label: "preview", command: "preview", run: "exec sleep 30", route: null, cwd: root,
+        log: path.join(root, "preview.log"), url: null, startedAt: new Date().toISOString(), pid: live.pid!,
+      } },
+    }))
+
+    const refused = await runCli(["up", "--local"], { cwd: root, stateRoot })
+    assert.equal(refused.exitCode, 1)
+    assert.match(refused.stderr, /workspace main is already running in tailscale mode\. Rerun with --switch to restart it in local mode/)
+
+    const switched = await runCli(["up", "--local", "--switch"], { cwd: root, stateRoot })
+    try {
+      assert.equal(switched.exitCode, 0, switched.stderr)
+      assert.match(switched.stdout, /^switching main from tailscale to local mode\nstopped tilly\/main\/preview\n/)
+      assert.match(switched.stdout, /^started web pid=\d+$/m)
+      assert.match(switched.stdout, /^started preview pid=\d+$/m)
+      const ps = await runCli(["ps", "--json"], { cwd: root, stateRoot })
+      assert.deepEqual(JSON.parse(ps.stdout).map((record: { command: string; status: string; mode: string }) => [record.command, record.status, record.mode]).sort(), [
+        ["preview", "up", "local"], ["web", "up", "local"],
+      ])
+    } finally {
+      await runCli(["down"], { cwd: root, stateRoot })
+    }
+  })
+
+  test("a mode switch validates before stopping and works without autoStart commands", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const live = spawn("sleep", ["60"], { stdio: "ignore", detached: true })
+    t.after(() => { try { process.kill(-live.pid!, "SIGKILL") } catch {} })
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { preview: { run: "exec sleep 30" } } }`)
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root,
+      exposure: { mode: "tailscale", domain: "dev.example.com", certFile: "cert", keyFile: "key", port: 47443 },
+      commands: { preview: {
+        id: "preview", label: "preview", command: "preview", run: "exec sleep 30", route: null, cwd: root,
+        log: path.join(root, "preview.log"), url: null, startedAt: new Date().toISOString(), pid: live.pid!,
+      } },
+    }))
+
+    const invalid = await runCli(["up", "--local", "--switch"], { cwd: root, stateRoot, env: { WORK_MAX_TTL_SECONDS: "invalid" } })
+    assert.equal(invalid.exitCode, 1)
+    assert.match(invalid.stderr, /WORK_MAX_TTL_SECONDS/)
+    assert.doesNotThrow(() => process.kill(live.pid!, 0))
+
+    const switched = await runCli(["up", "--local", "--switch"], { cwd: root, stateRoot })
+    try {
+      assert.equal(switched.exitCode, 0, switched.stderr)
+      assert.match(switched.stdout, /^switching main from tailscale to local mode\nstopped tilly\/main\/preview\n/)
+      assert.match(switched.stdout, /^started preview pid=\d+$/m)
+    } finally {
+      await runCli(["down"], { cwd: root, stateRoot })
+    }
+  })
+
+  test("names from Object.prototype are not commands", async () => {
+    const root = await tempDir()
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { web: { run: "exec sleep 30" } } }`)
+    for (const args of [["constructor"], ["run", "constructor"], ["up", "toString", "--no-create"], ["help", "constructor"]]) {
+      const result = await runCli(args, { cwd: root })
+      assert.equal(result.exitCode, 1, args.join(" "))
+      assert.doesNotMatch(result.stderr, /native code|TypeError|is a command in work\.config\.js/, args.join(" "))
+    }
   })
 
   test("wait matches a log line from the current run", async (t) => {

@@ -6,15 +6,17 @@ import { createRequire } from "node:module"
 import { Writable } from "node:stream"
 import { stdin as input, stdout as output } from "node:process"
 import { cloudflareExposure } from "./cloudflare.js"
-import { tailscaleExposure } from "./tailscale.js"
+import { checkServePort, tailscaleExposure } from "./tailscale.js"
 import { runTailscaleSetup, tailscaleDoctorLine } from "./tailscale-setup.js"
 import { buildCommit, buildDirty } from "./build-info.js"
 import { commandNames } from "./commands.js"
 import { complete, completionScript, shellInitScript } from "./completions.js"
-import { createConfig, loadConfig } from "./config.js"
+import { createConfig, loadConfig, resolveIdleTimeoutSeconds, resolveMaxTtlSeconds } from "./config.js"
 import { createWorktree, describeBranchSource, gitBranch, gitMainWorktree, gitRoot, resolveBranchSource, workspaceFromGit } from "./git.js"
 import { slugify, validateSlug } from "./names.js"
 import { commandRuntimeStatus, startupExits } from "./processes.js"
+import { deadReason, formatTime } from "./dead-reason.js"
+import type { DeadReason } from "./dead-reason.js"
 import type { StartupExit } from "./processes.js"
 import { waitForLog, waitForUrl } from "./readiness.js"
 import { MAX_TAIL_BYTES, currentRunOffset, forEachLogChunk, readLastLines } from "./logs.js"
@@ -32,7 +34,7 @@ import { callDaemon, daemonStatus, ensureDaemon, stopDaemon } from "./daemon-cli
 import type { DaemonStatus } from "./daemon-client.js"
 import { processUnit, sessionScope } from "./systemd.js"
 import { debugLog, errResult, formatError, ok } from "./result.js"
-import { formatUpdateStatus, readUpdateStatus } from "./updates.js"
+import { formatUpdateStatus, outdatedBuildHint, readUpdateStatus, takeUpdateNotice } from "./updates.js"
 import type { Result } from "./result.js"
 import type { CommandName } from "./commands.js"
 import type { CommandRecord, DevConfig, Exposure, StartResult, WorkspaceRecord, WorkspaceState } from "./types.js"
@@ -53,19 +55,45 @@ type StateFilters = {
   workspace?: string | undefined
 }
 
-const result = await main(process.argv.slice(2))
+const commandAliases: Readonly<Record<string, string>> = { ls: "ps", list: "ps" }
+const quietCommands = new Set(["_complete", "completions", "shell-init", "cd", "updates", "watch", "help", "--help", "-h", "--version", "-v"])
 
-if (!result.ok) {
-  console.error(formatError(result.error, { debug: Boolean(process.env["WORK_DEBUG"]) }))
-
-  if (process.env["WORK_DEBUG"]) {
-    console.error(`[tag: ${result.error.tag}]`)
+// Agents run work from outside the worktree; -C/--cwd works like git -C anywhere before --.
+function applyCwdFlag(args: ReadonlyArray<string>): Result<Array<string>> {
+  const remaining: Array<string> = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === "--") {
+      remaining.push(...args.slice(i))
+      break
+    }
+    const inline = arg.startsWith("--cwd=") ? arg.slice("--cwd=".length) : undefined
+    if (arg !== "-C" && arg !== "--cwd" && inline === undefined) {
+      remaining.push(arg)
+      continue
+    }
+    // After a value flag (work wait web --log -C), -C is that flag's value, not a directory.
+    if (inline === undefined && args[i + 1]?.startsWith("-")) {
+      remaining.push(arg)
+      continue
+    }
+    const directory = inline ?? args[++i]
+    if (!directory) return errResult("CLIError", `missing value for ${arg}`)
+    try {
+      process.chdir(directory)
+    } catch (cause) {
+      return errResult("CLIError", `cannot change to directory ${directory}`, cause)
+    }
   }
-
-  process.exitCode = 1
+  return ok(remaining)
 }
 
-async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
+async function main(rawArgs: ReadonlyArray<string>): Promise<Result<void>> {
+  const withoutCwd = rawArgs[0] === "_complete" ? ok([...rawArgs]) : applyCwdFlag(rawArgs)
+  if (!withoutCwd.ok) return withoutCwd
+  const args = withoutCwd.value
+  if (args[0] && Object.hasOwn(commandAliases, args[0])) args[0] = commandAliases[args[0]]!
+
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
     console.log(rootHelp())
     return ok(undefined)
@@ -78,7 +106,7 @@ async function main(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (args[0] === "help") {
-    const topic = args[1] ?? ""
+    const topic = args[1] && Object.hasOwn(commandAliases, args[1]) ? commandAliases[args[1]]! : args[1] ?? ""
     if (topic === "--help" || topic === "-h") {
       console.log(commandHelp("help"))
       return ok(undefined)
@@ -158,7 +186,8 @@ async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Resu
     return runComplete(args)
   }
 
-  const handler = (commandHandlers() as Record<string, CommandHandler>)[name]
+  const handlers = commandHandlers() as Record<string, CommandHandler>
+  const handler = Object.hasOwn(handlers, name) ? handlers[name] : undefined
 
   if (!handler) {
     return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, [...commandNames])} Run 'work --help'.`)
@@ -198,16 +227,16 @@ async function runInit(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { remote: valueFlag() },
+    flags: { remote: valueFlag(), workspace: valueFlag("w") },
   })
   if (!parsed.ok) return parsed
 
-  const workspaceName = parsed.value.positional[0]
+  const workspaceArg = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceArg.ok) return workspaceArg
+  const workspaceName = workspaceArg.value
   if (!workspaceName) {
     return errResult("CLIError", "missing workspace. Usage: work create <workspace> [--remote <name>]")
   }
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
 
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
@@ -226,13 +255,13 @@ async function runCreate(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { create: booleanFlag(), "no-create": booleanFlag(), remote: valueFlag(), cloudflare: booleanFlag(), tailscale: booleanFlag() },
+    flags: { create: booleanFlag(), "no-create": booleanFlag(), remote: valueFlag(), cloudflare: booleanFlag(), tailscale: booleanFlag(), local: booleanFlag(), switch: booleanFlag(), workspace: valueFlag("w") },
   })
   if (!parsed.ok) return parsed
 
-  const workspaceName = parsed.value.positional[0]
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
+  const workspaceArg = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceArg.ok) return workspaceArg
+  const workspaceName = workspaceArg.value
   const create = parsed.value.flags.create
   const noCreate = parsed.value.flags["no-create"]
   const remote = parsed.value.flags.remote
@@ -245,6 +274,10 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
+
+  if (workspaceName && !create && Object.hasOwn(ctx.value.config.commands, workspaceName) && !await workspaceExists(ctx.value, workspaceName)) {
+    return errResult("CLIError", `${workspaceName} is a command in work.config.js, not a workspace. Did you mean: work run ${workspaceName}? (work up ${workspaceName} --create makes a workspace of that name)`)
+  }
 
   const workspace = await resolveWorkspace(ctx.value, workspaceName, { create, noCreate, remote })
   if (!workspace.ok) return workspace
@@ -266,21 +299,21 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
     if (!exposure.ok) return exposure
   }
 
-  if (commands.length === 0) {
+  if (commands.length === 0 && !parsed.value.flags.switch) {
     console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
     return ok(undefined)
   }
 
-  return startConfigured(ctx.value, workspace.value, commands, "run", exposure.value, environment.value)
+  return startConfigured(ctx.value, workspace.value, commands, "run", exposure.value, environment.value, parsed.value.flags.switch)
 }
 
 async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { cloudflare: booleanFlag(), tailscale: booleanFlag() } })
+  const parsed = parseArgs(args, { flags: { cloudflare: booleanFlag(), tailscale: booleanFlag(), local: booleanFlag(), workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
 
-  const workspaceName = parsed.value.positional[0]
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
+  const workspaceArg = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceArg.ok) return workspaceArg
+  const workspaceName = workspaceArg.value
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
@@ -297,13 +330,13 @@ async function runSetup(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runDown(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { all: booleanFlag("a"), project: valueFlag("p") },
+    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w") },
   })
   if (!parsed.ok) return parsed
 
-  const workspaceArg = parsed.value.positional[0]
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
+  const workspaceResult = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceResult.ok) return workspaceResult
+  const workspaceArg = workspaceResult.value
   if (parsed.value.flags.all && workspaceArg) {
     return errResult("CLIError", "work down --all accepts no workspace argument")
   }
@@ -352,7 +385,7 @@ async function downStates(states: Array<Pick<WorkspaceState, "project" | "worksp
 }
 
 async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), cloudflare: booleanFlag(), tailscale: booleanFlag() } })
+  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w"), cloudflare: booleanFlag(), tailscale: booleanFlag(), local: booleanFlag(), switch: booleanFlag() } })
   if (!parsed.ok) return parsed
 
   const parsedTarget = workspaceCommandArgs(parsed.value.positional, parsed.value.flags.workspace)
@@ -365,9 +398,10 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
-  const commandConfig = ctx.value.config.commands[command]
+  const commandConfig = configuredCommand(ctx.value.config, command)
   if (!commandConfig) {
-    return errResult("CLIError", withSuggestion(`unknown command: ${command}`, command, Object.keys(ctx.value.config.commands)))
+    const configured = Object.keys(ctx.value.config.commands)
+    return errResult("CLIError", `${withSuggestion(`unknown command: ${command}`, command, configured)}\nwork run starts a command from work.config.js (${configured.join(", ") || "none configured"}); run scripts directly.`)
   }
 
   const workspace = await resolveWorkspace(ctx.value, parsedTarget.value.workspace, { create: false, noCreate: true, usage: "work run [-w workspace] <command>" })
@@ -378,14 +412,14 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const exposure = await resolveExposure(parsed.value.flags, environment.value, ctx.value.config.project, workspace.value.workspace)
   if (!exposure.ok) return exposure
 
-  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value, environment.value)
+  return startConfigured(ctx.value, workspace.value, [[command, commandConfig]], "run", exposure.value, environment.value, parsed.value.flags.switch)
 }
 
 const restartUsage = "work restart [workspace] <command>... | work restart -w workspace <command>... | work restart --all"
 
 async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w"), cloudflare: booleanFlag(), tailscale: booleanFlag() },
+    flags: { all: booleanFlag("a"), project: valueFlag("p"), workspace: valueFlag("w"), cloudflare: booleanFlag(), tailscale: booleanFlag(), local: booleanFlag(), switch: booleanFlag() },
   })
   if (!parsed.ok) return parsed
 
@@ -394,8 +428,9 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const positional = parsed.value.positional
   const ctx = await loadProjectContext()
   if (!ctx.ok || projectArg) {
-    if (parsed.value.flags.tailscale) {
-      return errResult("CLIError", "--tailscale needs the project config; tracked restarts keep their routing mode")
+    const modeFlag = (["tailscale", "cloudflare", "local", "switch"] as const).find((flag) => parsed.value.flags[flag])
+    if (modeFlag) {
+      return errResult("CLIError", `--${modeFlag} needs the project config; tracked restarts keep their routing mode. Run it from the worktree (or with -C <worktree>)`)
     }
 
     const target = await trackedWorkspaceCommands(positional, parsed.value.flags)
@@ -433,12 +468,12 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (all) {
     const autoStart = Object.entries(ctx.value.config.commands).filter(([, command]) => command.autoStart)
 
-    if (autoStart.length === 0) {
+    if (autoStart.length === 0 && !parsed.value.flags.switch) {
       console.log(`no autoStart commands in work.config.js for ${ctx.value.config.project}`)
       return ok(undefined)
     }
 
-    return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value, environment.value)
+    return startConfigured(ctx.value, workspace.value, autoStart, "restart", exposure.value, environment.value, parsed.value.flags.switch)
   }
 
   if (target.commands.length === 0) {
@@ -447,14 +482,14 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const entries: Array<[string, DevConfig["commands"][string]]> = []
   for (const command of target.commands) {
-    const commandConfig = ctx.value.config.commands[command]
+    const commandConfig = configuredCommand(ctx.value.config, command)
     if (!commandConfig) {
       return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, command, Object.keys(ctx.value.config.commands)))
     }
     entries.push([command, commandConfig])
   }
 
-  return startConfigured(ctx.value, workspace.value, entries, "restart", exposure.value, environment.value)
+  return startConfigured(ctx.value, workspace.value, entries, "restart", exposure.value, environment.value, parsed.value.flags.switch)
 }
 
 async function startConfigured(
@@ -464,12 +499,41 @@ async function startConfigured(
   type: "run" | "restart",
   exposure: Exposure,
   environment: NodeJS.ProcessEnv,
+  switchMode = false,
 ): Promise<Result<void>> {
+  const plan = switchMode ? await planModeSwitch(ctx, workspace, exposure, entries) : ok({ from: null, entries })
+  if (!plan.ok) return plan
+  entries = plan.value.entries
+  if (entries.length === 0) {
+    console.log(`nothing to start in ${workspace.workspace}`)
+    return ok(undefined)
+  }
+
+  // Everything that can fail runs before a mode switch stops the running commands.
+  const timeouts = await validateTimeouts(ctx.config)
+  if (!timeouts.ok) return timeouts
+  if (exposure.mode === "tailscale" && entries.some(([, command]) => command.route)) {
+    const serve = await checkServePort(exposure.port, environment)
+    if (!serve.ok) return serve
+  }
   const portless = await ensurePortless(Object.fromEntries(entries))
   if (!portless.ok) return portless
   const routed = entries.filter(([, command]) => usesPortless(command))
   const proxy = await ensurePortlessProxy(await portlessEndpoints({ ...ctx.config.env, ...environment }, Object.fromEntries(routed.map(([id, command]) => [id, command.env]))))
   if (!proxy.ok) return proxy
+
+  if (plan.value.from) {
+    console.log(`switching ${workspace.workspace} from ${plan.value.from} to ${exposure.mode} mode`)
+    const stopped = await downStates([{ project: ctx.config.project, workspace: workspace.workspace }])
+    if (!stopped.ok) return stopped
+  }
+
+  const previous = await readWorkspaceState(ctx.config.project, workspace.workspace)
+  for (const [id] of entries) {
+    const record = previous.ok ? previous.value?.commands[id] : undefined
+    const reason = record ? deadReason(record) : null
+    if (reason && await commandRuntimeStatus(record!) === "dead") console.log(`${id} was ${reason.text}; starting it again`)
+  }
 
   const starts: Array<ProcessStart> = []
   for (const [id] of entries) {
@@ -494,6 +558,40 @@ async function startConfigured(
 }
 
 type TrackedTarget = { project: string; workspace: string; command: string }
+
+// Only on explicit --switch: stopping a workspace someone else (often CI) runs in another mode must be a deliberate choice.
+// Commands that were live before the switch start again in the new mode.
+async function planModeSwitch(
+  ctx: ProjectContext,
+  workspace: WorkspaceRecord,
+  exposure: Exposure,
+  entries: Array<[string, DevConfig["commands"][string]]>,
+): Promise<Result<{ from: string | null; entries: Array<[string, DevConfig["commands"][string]]> }>> {
+  const state = await readWorkspaceState(ctx.config.project, workspace.workspace)
+  if (!state.ok) return state
+  const live = []
+  for (const record of Object.values(state.value?.commands ?? {})) if (await commandRuntimeStatus(record) === "up") live.push(record)
+  const liveMode = state.value?.exposure?.mode ?? "local"
+  if (live.length === 0 || liveMode === exposure.mode) return ok({ from: null, entries })
+
+  const requested = new Set(entries.map(([id]) => id))
+  const restarted = live
+    .filter((record) => !requested.has(record.id) && configuredCommand(ctx.config, record.id))
+    .map((record): [string, DevConfig["commands"][string]] => [record.id, ctx.config.commands[record.id]!])
+  return ok({ from: liveMode, entries: [...entries, ...restarted] })
+}
+
+// Command ids come from users and agents; "constructor" must not resolve through the prototype.
+function configuredCommand(config: DevConfig, id: string) {
+  return Object.hasOwn(config.commands, id) ? config.commands[id] : undefined
+}
+
+async function validateTimeouts(config: DevConfig): Promise<Result<void>> {
+  const ttl = await resolveMaxTtlSeconds(config, process.env)
+  if (!ttl.ok) return ttl
+  const idle = await resolveIdleTimeoutSeconds(config, process.env)
+  return idle.ok ? ok(undefined) : idle
+}
 
 async function restartTrackedStates(states: Array<WorkspaceState>): Promise<Result<void>> {
   const targets = states.flatMap((state) =>
@@ -637,20 +735,26 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
   if (!scope.ok) return scope
 
   const records = []
+  const statuses: Array<string> = []
   for (const state of scope.value.states) {
     for (const command of Object.values(state.commands)) {
+      const reason = deadReason(command)
       records.push({
         project: state.project,
         workspace: state.workspace,
         command: command.id,
         status: await commandRuntimeStatus(command),
+        mode: command.exposure?.mode ?? state.exposure?.mode ?? "local",
         pid: command.pid,
         url: command.url ?? null,
         exitCode: command.exitCode ?? null,
         exitSignal: command.exitSignal ?? null,
         exitedAt: command.exitedAt ?? null,
+        reason: reason?.kind ?? null,
+        reasonText: reason?.text ?? null,
         ...(command.idleStoppedAt ? { idleStoppedAt: command.idleStoppedAt, idleStoppedSeconds: command.idleStoppedSeconds } : {}),
       })
+      statuses.push(statusLabel(records.at(-1)!.status, command.exitedAt, reason))
     }
   }
 
@@ -659,26 +763,14 @@ async function trackedCommandTable(all: boolean, json = false, workspace?: strin
     return ok(scope.value.empty)
   }
 
-  const rows = records.map((record) => [statusLabel(record), `${record.project}/${record.workspace}`, record.command, String(record.pid), record.url ?? ""])
-  return ok(formatTable([["status", "workspace", "command", "pid", "url"], ...rows]))
+  const rows = records.map((record, index) => [statuses[index]!, `${record.project}/${record.workspace}`, record.command, record.mode, String(record.pid), record.url ?? ""])
+  return ok(formatTable([["status", "workspace", "command", "mode", "pid", "url"], ...rows]))
 }
 
-function statusLabel(record: { status: string; exitCode: number | null; exitSignal: string | null; exitedAt: string | null; idleStoppedAt?: string; idleStoppedSeconds?: number }) {
-  if (record.idleStoppedAt && record.exitedAt === record.idleStoppedAt) {
-    const seconds = record.idleStoppedSeconds ?? 0
-    const duration = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h` : seconds >= 60 ? `${Math.floor(seconds / 60)}m` : `${seconds}s`
-    return `stopped (idle ${duration}, ${formatExitTime(new Date(record.idleStoppedAt))})`
-  }
-  if (!record.exitedAt) return record.status
-  const exit = record.exitSignal ?? (record.exitCode === null ? null : `exit ${record.exitCode}`)
-  return `${record.status} (${exit ? `${exit}, ` : ""}${formatExitTime(new Date(record.exitedAt))})`
-}
-
-function formatExitTime(date: Date) {
-  const pad = (value: number) => String(value).padStart(2, "0")
-  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  if (date.toDateString() === new Date().toDateString()) return time
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}`
+function statusLabel(status: string, exitedAt: string | undefined, reason: DeadReason | null) {
+  if (!exitedAt) return status
+  const stopped = reason?.kind === "idle" || reason?.kind === "ttl"
+  return `${stopped ? "stopped" : status} (${reason ? `${reason.label}, ` : ""}${formatTime(new Date(exitedAt))})`
 }
 
 function interruptibleSleep(ms: number, stopped: () => boolean): Promise<void> {
@@ -807,16 +899,20 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
 }
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { project: valueFlag("p"), json: booleanFlag() } })
+  const parsed = parseArgs(args, {
+    flags: { project: valueFlag("p"), workspace: valueFlag("w"), json: booleanFlag(), tailscale: booleanFlag(), cloudflare: booleanFlag(), local: booleanFlag() },
+  })
   if (!parsed.ok) return parsed
 
-  const workspaceArg = parsed.value.positional[0]
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
+  const workspaceResult = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceResult.ok) return workspaceResult
+  const workspaceArg = workspaceResult.value
+  const requestedMode = parsed.value.flags.tailscale ? "tailscale" : parsed.value.flags.cloudflare ? "cloudflare" : parsed.value.flags.local ? "local" : null
   const ctx = await loadProjectContext()
   if (!ctx.ok || parsed.value.flags.project) {
     const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
     if (!states.ok) return states
+    printUrlsModeNotes(states.value, requestedMode)
     if (parsed.value.flags.json) {
       console.log(urlsJson(states.value))
       return ok(undefined)
@@ -840,6 +936,7 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   const workspace = workspaceArg ? slugify(workspaceArg) : await defaultWorkspace(ctx.value.cwdRoot)
   const stateResult = await readWorkspaceState(ctx.value.config.project, workspace)
   if (!stateResult.ok) return stateResult
+  printUrlsModeNotes(stateResult.value ? [stateResult.value] : [], requestedMode)
   if (parsed.value.flags.json) {
     console.log(urlsJson(stateResult.value ? [stateResult.value] : []))
     return ok(undefined)
@@ -859,6 +956,16 @@ async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   return ok(undefined)
+}
+
+// urls lists what runs; a mode flag here is accepted so a guessed --tailscale explains instead of failing.
+function printUrlsModeNotes(states: Array<WorkspaceState>, requestedMode: string | null) {
+  if (!requestedMode) return
+  for (const state of states) {
+    const mode = state.exposure?.mode ?? "local"
+    if (mode === requestedMode || Object.keys(state.commands).length === 0) continue
+    console.error(`note: ${state.project}/${state.workspace} runs in ${mode} mode; work urls lists its live URLs. Switch with: work up ${state.workspace} --${requestedMode} --switch`)
+  }
 }
 
 function urlsJson(states: Array<WorkspaceState>): string {
@@ -939,7 +1046,13 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   const state = await readWorkspaceState(project, workspace)
   if (!state.ok) return state
   const record = state.value?.commands[command]
-  if (!record) return errResult("CLIError", `no tracked command: ${workspace}/${command}`)
+  if (!record) return errResult("CLIError", await untrackedWaitMessage(state.value, workspace, command))
+  const stoppedReason = deadReason(record)
+  // workd restarts crashed on-exit commands, but never ones stopped for idle or TTL.
+  const restartsItself = record.restart === "on-exit" && stoppedReason?.kind !== "idle" && stoppedReason?.kind !== "ttl"
+  if (stoppedReason && !restartsItself && await commandRuntimeStatus(record) === "dead") {
+    return errResult("ProcessError", `${workspace}/${command} was ${stoppedReason.text}. Start it again: work up ${workspace} (or work run ${workspace} ${command})`)
+  }
   const configured = !logFlag.value && record.ready ? logPattern(record.ready.log, "ready.log") : ok(undefined)
   if (!configured.ok) return configured
   const pattern = logFlag.value ?? configured.value
@@ -985,6 +1098,17 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. ${logsHint}`)
   console.log(record.url)
   return ok(undefined)
+}
+
+// Agents often send work up output to a file and only see wait fail, so wait explains the likely cause itself.
+async function untrackedWaitMessage(state: WorkspaceState | null, workspace: string, command: string) {
+  const message = `no tracked command: ${workspace}/${command}`
+  const live = []
+  for (const record of Object.values(state?.commands ?? {})) if (await commandRuntimeStatus(record) === "up") live.push(record.id)
+  if (live.length === 0) return `${message}. Nothing runs in ${workspace}; start it with: work up ${workspace} (or work run ${workspace} ${command}), and check that command's output for errors`
+  const mode = state?.exposure?.mode ?? "local"
+  return `${message}. ${workspace} runs ${live.join(", ")} in ${mode} mode; work up/run/restart with another mode flag is refused while it runs. ` +
+    `Rerun that command with --switch to restart the workspace in the new mode, or start ${command} in ${mode} mode: work run ${workspace} ${command}`
 }
 
 function logPattern(source: string, field: string): Result<RegExp> {
@@ -1236,12 +1360,12 @@ async function runShellInit(args: ReadonlyArray<string>): Promise<Result<void>> 
 }
 
 async function runCd(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args)
+  const parsed = parseArgs(args, { flags: { workspace: valueFlag("w") } })
   if (!parsed.ok) return parsed
 
-  const workspaceName = parsed.value.positional[0]
-  const extra = unexpectedPositional(parsed.value.positional, 1)
-  if (extra) return extra
+  const workspaceArg = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
+  if (!workspaceArg.ok) return workspaceArg
+  const workspaceName = workspaceArg.value
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
@@ -1511,12 +1635,13 @@ function workspaceSetupEnv(config: DevConfig, sourceRoot: string, workspace: Wor
 }
 
 async function resolveExposure(
-  flags: { cloudflare?: boolean | undefined; tailscale?: boolean | undefined },
+  flags: { cloudflare?: boolean | undefined; tailscale?: boolean | undefined; local?: boolean | undefined },
   environment: Record<string, string>,
   project: string,
   workspace: string,
 ): Promise<Result<Exposure>> {
-  if (flags.cloudflare && flags.tailscale) return errResult("CLIError", "choose --cloudflare or --tailscale, not both")
+  if ([flags.cloudflare, flags.tailscale, flags.local].filter(Boolean).length > 1) return errResult("CLIError", "choose one of --local, --cloudflare or --tailscale")
+  if (flags.local) return ok({ mode: "local" })
   if (flags.cloudflare) return cloudflareExposure(environment)
   if (flags.tailscale) return tailscaleExposure(environment)
   const state = await readWorkspaceState(project, workspace)
@@ -1540,6 +1665,12 @@ function printStartupExit(command: string, pid: number, exit: StartupExit) {
   const status = exit.signal ? ` on ${exit.signal}` : exit.code === null ? "" : ` with code ${exit.code}`
   console.log(`failed ${command} pid=${pid} exited${status}`)
   for (const line of exit.tail.length > 0 ? exit.tail : ["(no output)"]) console.log(`  ${line}`)
+}
+
+function workspaceArgument(positional: ReadonlyArray<string>, workspaceFlag: string | undefined): Result<string | undefined> {
+  if (workspaceFlag && positional[0]) return errResult("CLIError", `unexpected argument: ${positional[0]} (-w already names the workspace)`)
+  const extra = unexpectedPositional(positional, 1)
+  return extra ?? ok(workspaceFlag ?? positional[0])
 }
 
 function unexpectedPositional(positional: ReadonlyArray<string>, count: number): Result<never> | null {
@@ -1654,7 +1785,7 @@ async function resolveWorkspace(
 
 function missingWorkspaceMessage(config: DevConfig, workspace: string, usage: string | undefined) {
   const message = `workspace ${workspace} does not exist`
-  return usage && config.commands[workspace] ? `${message}; ${workspace} is a command id. Usage: ${usage}` : message
+  return usage && configuredCommand(config, workspace) ? `${message}; ${workspace} is a command id. Usage: ${usage}` : message
 }
 
 async function confirm(question: string) {
@@ -1667,4 +1798,42 @@ async function confirm(question: string) {
   rl.close()
 
   return !answer || answer.toLowerCase().startsWith("y")
+}
+
+// Runs last so every module-level constant is initialized before a command reads it.
+const argv = process.argv.slice(2)
+let updateHintShown = false
+const result = await main(argv)
+
+if (!result.ok) {
+  console.error(formatError(result.error, { debug: Boolean(process.env["WORK_DEBUG"]) }))
+
+  if (process.env["WORK_DEBUG"]) {
+    console.error(`[tag: ${result.error.tag}]`)
+  }
+
+  // An unknown flag or command is often one a newer build added, as on hosts that run an old checkout.
+  if (result.error.tag === "CLIError" && isUnknownWorkSyntax(result.error.message)) {
+    const hint = await outdatedBuildHint()
+    if (hint) console.error(hint)
+    updateHintShown = Boolean(hint)
+  }
+
+  process.exitCode = 1
+}
+
+if (!updateHintShown) await printUpdateNotice(argv)
+
+// Typos in work.config.js command names are not a sign of an old build.
+function isUnknownWorkSyntax(message: string) {
+  return message.startsWith("unknown flag") || (message.startsWith("unknown command") && message.includes("Run 'work --help'"))
+}
+
+// Agents see stderr too, so they learn about updates; --json callers often parse both streams.
+// Reads only the file workd caches, so the command never waits on the network.
+async function printUpdateNotice(args: ReadonlyArray<string>) {
+  const command = args.find((arg, index) => !arg.startsWith("-") && !["-C", "--cwd"].includes(args[index - 1] ?? ""))
+  if (!command || args.includes("--json") || quietCommands.has(command)) return
+  const notice = await takeUpdateNotice().catch(() => null)
+  if (notice) console.error(notice)
 }

@@ -80,6 +80,8 @@ export type CommandRecord = {
   idleSockets?: Record<string, number>
   idleStoppedAt?: string
   idleStoppedSeconds?: number
+  // Why a dead record without a usable exit status died: TTL expiry, a reboot, or while no workd watched it.
+  stopReason?: "ttl" | "reboot" | "lost"
   pid: number
   exitedAt?: string
   exitCode?: number
@@ -96,7 +98,7 @@ export type WorkspaceState = WorkspaceRecord & {
   worktreeFingerprint?: string
 }
 
-export const DAEMON_PROTOCOL_VERSION = 12
+export const DAEMON_PROTOCOL_VERSION = 13
 
 export type DaemonCommand =
   | {

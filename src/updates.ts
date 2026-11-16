@@ -1,6 +1,8 @@
 import fs from "node:fs/promises"
+import { existsSync, readFileSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { buildCommit } from "./build-info.js"
 import { debugLog, describe } from "./result.js"
 import { stateRoot } from "./state.js"
@@ -8,6 +10,8 @@ import { stateRoot } from "./state.js"
 const repository = "https://github.com/carlassmann/work-cli"
 const api = "https://api.github.com/repos/carlassmann/work-cli"
 const checkIntervalMs = 3_600_000
+const noticeLockStaleMs = 10_000
+const noticeIntervalMs = 24 * checkIntervalMs
 const commitPattern = /^[a-f0-9]{40}$/
 const statuses = ["current", "available", "ahead", "diverged", "unknown"] as const
 
@@ -107,12 +111,19 @@ async function githubJson(url: string, fetcher: typeof fetch, signal?: AbortSign
   return data as Record<string, unknown>
 }
 
-export function startUpdateChecker(commit: string | null = buildCommit, fetcher: typeof fetch = fetch): () => void {
-  if (!commit || process.env["WORK_NO_UPDATE_CHECK"] === "1") return () => undefined
+// installedCommit is read on every tick, so a long-lived workd can check the build now on disk after a rebuild.
+export function startUpdateChecker(
+  initialCommit: string | null = buildCommit,
+  fetcher: typeof fetch = fetch,
+  installedCommit: () => string | null = () => initialCommit,
+): () => void {
+  if (!initialCommit || process.env["WORK_NO_UPDATE_CHECK"] === "1") return () => undefined
   const controller = new AbortController()
   let checking = false
   const tick = async () => {
     if (checking || controller.signal.aborted) return
+    const commit = installedCommit()
+    if (!commit) return
     checking = true
     try {
       const cached = await readUpdateStatus(commit)
@@ -137,11 +148,90 @@ export function formatUpdateStatus(status: UpdateStatus | null, commit: string |
   if (!status) return "update status unknown: no cached check for this build; run work daemon start"
   const messages: Record<UpdateState, string> = {
     current: "up to date with main",
-    available: `update available: ${status.latestCommit?.slice(0, 7)}\n${repository}/commit/${status.latestCommit}`,
+    available: `update available: ${status.latestCommit?.slice(0, 7)}\n${repository}/commit/${status.latestCommit}\nupdate with: ${updateCommand()}`,
     ahead: "installed commit is ahead of main",
     diverged: "installed commit has diverged from main",
     unknown: "update status unknown: no successful check",
   }
   const stale = status.checkedAt && Date.now() - Date.parse(status.checkedAt) > 24 * checkIntervalMs
   return `${stale ? "stale cached status: " : ""}${messages[status.status]}${status.checkedAt ? `\nlast checked: ${status.checkedAt}` : ""}${status.error ? `\nlast attempt failed: ${status.error}` : ""}`
+}
+
+function packageRoot() {
+  return fileURLToPath(new URL("../", import.meta.url))
+}
+
+export function installedBuildCommit(file = path.join(packageRoot(), "dist", "build-info.js")): string | null {
+  try {
+    const match = /buildCommit = "([a-f0-9]{40})"/.exec(readFileSync(file, "utf8"))
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+export function updateCommand(root = packageRoot()): string {
+  if (!existsSync(path.join(root, ".git"))) return `reinstall from ${repository}#install`
+  const directory = root.replace(/\/$/, "")
+  const quoted = /^[\w./-]+$/.test(directory) ? directory : `'${directory.replaceAll("'", "'\\''")}'`
+  return `cd ${quoted} && git pull && bun install && bun run build && work daemon stop && work daemon start`
+}
+
+function noticeFile() {
+  return path.join(stateRoot(), "update-notice.json")
+}
+
+// Shown at most once a day per available commit, so agents and humans notice an outdated build without noise.
+export async function takeUpdateNotice(commit: string | null = buildCommit, now = Date.now()): Promise<string | null> {
+  if (process.env["WORK_NO_UPDATE_CHECK"] === "1") return null
+  const status = await readUpdateStatus(commit)
+  if (status?.status !== "available" || !status.latestCommit) return null
+  // Agents run many work commands in parallel; the lock lets exactly one of them show the notice.
+  const release = await claimNoticeLock()
+  if (!release) return null
+  try {
+    if (await noticeShownRecently(status.latestCommit, now)) return null
+    await fs.writeFile(noticeFile(), `${JSON.stringify({ latestCommit: status.latestCommit, shownAt: new Date(now).toISOString() })}\n`, { mode: 0o600 })
+  } catch {
+    return null
+  } finally {
+    await release()
+  }
+  return availableUpdateLine(status)
+}
+
+async function noticeShownRecently(latestCommit: string, now: number) {
+  try {
+    const shown = JSON.parse(await fs.readFile(noticeFile(), "utf8")) as { latestCommit?: unknown; shownAt?: unknown }
+    return shown.latestCommit === latestCommit && typeof shown.shownAt === "string" && now - Date.parse(shown.shownAt) < noticeIntervalMs
+  } catch {
+    return false
+  }
+}
+
+async function claimNoticeLock(): Promise<(() => Promise<void>) | null> {
+  const lock = `${noticeFile()}.lock`
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await (await fs.open(lock, "wx", 0o600)).close()
+      return () => fs.rm(lock, { force: true })
+    } catch {
+      // A crashed command must not suppress the notice forever.
+      const stat = await fs.stat(lock).catch(() => null)
+      if (!stat || Date.now() - stat.mtimeMs < noticeLockStaleMs) return null
+      await fs.rm(lock, { force: true })
+    }
+  }
+  return null
+}
+
+export async function outdatedBuildHint(commit: string | null = buildCommit): Promise<string | null> {
+  if (process.env["WORK_NO_UPDATE_CHECK"] === "1") return null
+  const status = await readUpdateStatus(commit)
+  if (status?.status !== "available") return null
+  return `your work build may be outdated: ${availableUpdateLine(status)}`
+}
+
+function availableUpdateLine(status: UpdateStatus) {
+  return `work ${status.latestCommit?.slice(0, 7)} available (installed ${status.installedCommit.slice(0, 7)}). Update: ${updateCommand()}`
 }

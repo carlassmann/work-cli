@@ -8,7 +8,7 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
-import { parseServeTarget, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
+import { checkServePort, parseServeTarget, serveConflictMessage, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -64,11 +64,44 @@ describe("tailscale", () => {
     assert.match(missing.ok ? "" : missing.error.message, /work tailscale setup/)
   })
 
+  test("a forward to a server listening only on ::1 is not taken over", async (t) => {
+    const server = net.createServer()
+    await new Promise<void>((resolve) => server.listen(0, "::1", resolve))
+    t.after(() => server.close())
+    const port = (server.address() as net.AddressInfo).port
+    const bin = await tempDir()
+    await fs.writeFile(path.join(bin, "tailscale"), `#!/bin/sh\necho '${JSON.stringify({ TCP: { "443": { TCPForward: `localhost:${port}` } } })}'\n`, { mode: 0o755 })
+    const environment = { ...process.env, PATH: `${bin}:${process.env["PATH"]}` }
+
+    const held = await checkServePort(47443, environment)
+    assert.match(held.ok ? "" : held.error.message, new RegExp(`forwards tailnet port 443 to localhost:${port}`))
+    server.close()
+    assert.ok((await checkServePort(47443, environment)).ok)
+  })
+
   test("finds what tailscale serve forwards on port 443", () => {
     assert.equal(parseServeTarget(""), null)
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "8443": { HTTPS: true } } })), null)
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:47443" } } })), "127.0.0.1:47443")
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { HTTPS: true } } })), "another tailscale serve handler")
+  })
+
+  test("a port 443 conflict names the handler and the commands that free it", () => {
+    const https = JSON.stringify({
+      TCP: { "443": { HTTPS: true } },
+      Web: {
+        "box.tail1.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3000" }, "/docs": { Path: "/srv/docs" } } },
+        "box.tail1.ts.net:8443": { Handlers: { "/": { Proxy: "http://127.0.0.1:9000" } } },
+      },
+    })
+    const message = serveConflictMessage(https, "127.0.0.1:47443")
+    assert.match(message, /uses tailnet port 443 for \/ -> http:\/\/127\.0\.0\.1:3000, \/docs -> \/srv\/docs;/)
+    assert.match(message, /tailscale serve --https=443 off && tailscale serve --bg --https=8443 http:\/\/127\.0\.0\.1:3000 && tailscale serve --bg --https=8443 --set-path=\/docs \/srv\/docs/)
+    assert.doesNotMatch(message, /9000/)
+
+    const forward = serveConflictMessage(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:5000" } } }), "127.0.0.1:47443")
+    assert.match(forward, /forwards tailnet port 443 to 127\.0\.0\.1:5000, which is in use/)
+    assert.match(forward, /tailscale serve --tcp=443 off/)
   })
 
   test("proxy hands requests and WebSocket upgrades to the local URL with the public origin", async (t) => {

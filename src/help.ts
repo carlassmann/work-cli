@@ -16,9 +16,10 @@ Commands:
 ${commandList}
 
 The workspace is implied from the current git branch. Pass it explicitly
-as a positional to up/setup/down/urls/cd/ps/run/restart/logs/stop,
-or via -w where supported.
+as a positional or via -w to any workspace-scoped command.
+-C <dir> (or --cwd <dir>) runs work as if started in <dir>, like git -C.
 State-only commands also work outside a project; ps/status/watch show all tracked state there.
+ls and list are aliases for ps.
 
 Examples:
   work init tilly
@@ -46,13 +47,16 @@ Run:
 
   updates: `work updates
 
-Show the cached update status for this build. Does not contact the network or start workd.
+Show the cached update status for this build and the command that updates it.
+Does not contact the network or start workd.
 
 Usage:
   work updates
 
 workd checks main in the background at startup and hourly. Start it with work daemon start.
-WORK_NO_UPDATE_CHECK=1 disables background checks.
+When an update is available, commands print a one-line notice on stderr at most
+once a day (read from workd's cache, no network wait); --json output never gets it.
+WORK_NO_UPDATE_CHECK=1 disables background checks and the notice.
 work --version shows the commit baked into the installed build.`,
 
   init: `work init
@@ -75,6 +79,7 @@ Create a git worktree without running setup or starting commands.
 
 Usage:
   work create <workspace> [--remote <name>]
+  work create -w <workspace> [--remote <name>]
 
 Arguments:
   workspace    Branch name. The workspace slug is derived from it.
@@ -97,7 +102,7 @@ Examples:
 Start all autoStart commands for a workspace.
 
 Usage:
-  work up [workspace] [--create|--no-create] [--remote <name>] [--cloudflare|--tailscale]
+  work up [workspace] [--create|--no-create] [--remote <name>] [--local|--cloudflare|--tailscale] [--switch]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -106,8 +111,12 @@ Options:
   --create           Create a missing git worktree without asking.
   --no-create        Fail if the workspace worktree does not exist.
   --remote <name>    Fetch the branch from this remote and track it when creating.
+  -w, --workspace <name>    Same as the workspace argument.
+  --local            Serve routed commands on *.localhost only (the default).
   --cloudflare       Publish routed commands through Cloudflare Tunnel.
   --tailscale        Serve routed commands to your tailnet devices (work docs tailscale).
+  --switch           If the workspace runs in another mode, stop it and start its
+                     live commands again in the requested mode.
 
 Behavior:
   work up                      Use current worktree.
@@ -118,19 +127,22 @@ Behavior:
   work up feature-x --create   Run worktrees.setup after create.
   work up                      Start nothing routed while the portless proxy is down; print how to start it.
   work up                      Report a command that exits within 1.5s as failed, with its last log lines.
+  work up --tailscale          Refuse while the workspace runs in another mode; --switch restarts it.
+  work up web                  Point to work run web when web is a command and no workspace.
 
 Examples:
   work up
   work up feature-x
   work up feature-x --create
-  work up feature-x --create --remote origin`,
+  work up feature-x --create --remote origin
+  work up --tailscale --switch`,
 
   setup: `work setup
 
 Run worktrees.setup for a workspace.
 
 Usage:
-  work setup [workspace] [--cloudflare|--tailscale]
+  work setup [workspace] [--local|--cloudflare|--tailscale]
 
 Arguments:
   workspace    Workspace slug. Defaults to current git branch slug.
@@ -162,6 +174,7 @@ Stop tracked commands for one workspace, or a broader scope with --all.
 
 Usage:
   work down [workspace]
+  work down -w workspace
   work down --all
 
 Arguments:
@@ -171,6 +184,7 @@ Options:
   -a, --all                 Inside a project: stop tracked commands for this project.
                             Outside a project: stop all tracked commands.
   -p, --project <name>      Filter tracked state by project.
+  -w, --workspace <name>    Same as the workspace argument.
 
 Examples:
   work down
@@ -221,6 +235,7 @@ Options:
 
 Exit:
   1 on timeout or when the command stops before it is ready.
+  When the command is not tracked or was stopped (idle, TTL, crash), says why and how to start it.
 
 Examples:
   work wait web
@@ -232,9 +247,9 @@ Examples:
 Stop and start configured commands, or autoStart commands with --all.
 
 Usage:
-  work restart [workspace] <command>... [--cloudflare|--tailscale]
-  work restart [-p project] [-w workspace] <command>... [--cloudflare|--tailscale]
-  work restart [-p project] [-w workspace] --all [--cloudflare|--tailscale]
+  work restart [workspace] <command>... [--local|--cloudflare|--tailscale] [--switch]
+  work restart [-p project] [-w workspace] <command>... [--local|--cloudflare|--tailscale] [--switch]
+  work restart [-p project] [-w workspace] --all [--local|--cloudflare|--tailscale] [--switch]
 
 Arguments:
   command      Configured command id. Pass several to restart them in order.
@@ -244,8 +259,10 @@ Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
   -a, --all                 Inside a project: restart autoStart commands for the workspace.
                             Outside a project: restart matching tracked commands.
+  --local                   Serve routed commands on *.localhost only.
   --cloudflare              Publish routed commands through Cloudflare Tunnel.
   --tailscale               Serve routed commands to your tailnet devices.
+  --switch                  Stop the workspace first if it runs in another mode.
 
 Workspace or command:
   With two or more arguments and no -w, the first is a command when it names a
@@ -271,16 +288,18 @@ Examples:
 Start one configured command.
 
 Usage:
-  work run [workspace] <command> [--cloudflare|--tailscale]
-  work run [-w workspace] <command> [--cloudflare|--tailscale]
+  work run [workspace] <command> [--local|--cloudflare|--tailscale] [--switch]
+  work run [-w workspace] <command> [--local|--cloudflare|--tailscale] [--switch]
 
 Arguments:
   command      Configured command id.
 
 Options:
   -w, --workspace <name>    Target workspace. Defaults to current git branch slug.
+  --local                   Serve the routed command on *.localhost only.
   --cloudflare              Publish the routed command through Cloudflare Tunnel.
   --tailscale               Serve the routed command to your tailnet devices.
+  --switch                  Stop the workspace first if it runs in another mode.
 
 Behavior:
   If the command is already alive, work prints "already up".
@@ -288,6 +307,7 @@ Behavior:
   If route is enabled and the portless proxy is down, work prints how to start it and starts nothing.
   If the command exits within 1.5s, work reports it as failed with its last log lines.
   An exit with code 0 in that time prints "exited" and is not a failure.
+  work run only starts commands from work.config.js; run scripts directly.
 
 Examples:
   work run web
@@ -312,12 +332,19 @@ Options:
   --json                    Print an array of command objects.
 
 Output:
-  status    project/workspace    command    pid    url
+  status    project/workspace    command    mode    pid    url
+
+  mode is local, tailscale or cloudflare. --json adds mode, reason
+  (idle, ttl, exit, signal, reboot, lost or null) and reasonText.
 
 Status:
   up
   dead (exit 1, 12:04:31)   exit code or signal and time, once workd notices
   stopped (idle 2h, 14:03:00)   workspace stopped after routed servers were idle
+  stopped (ttl 1h, 14:03:00)    maxTtlSeconds passed without worktree changes
+  dead (reboot, 09:12:00)       the machine rebooted since it started
+  dead (exit unknown, 09:12:00) it died while no workd watched it (workd restarted
+                                or its session ended); time is when workd noticed
 
 Dead commands stay listed until they start again, work down, work stop, or work prune.
 
@@ -622,6 +649,6 @@ export function commandHelp(name: string) {
 }
 
 export function helpSection(name: string): HelpSection | null {
-  if (name in sections) return name as HelpSection
+  if (Object.hasOwn(sections, name)) return name as HelpSection
   return null
 }

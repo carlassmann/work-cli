@@ -4,7 +4,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import assert from "node:assert/strict"
 import { afterEach, beforeEach, describe, test } from "node:test"
-import { checkForUpdates, formatUpdateStatus, readUpdateStatus, startUpdateChecker } from "./updates.js"
+import { checkForUpdates, formatUpdateStatus, installedBuildCommit, outdatedBuildHint, readUpdateStatus, startUpdateChecker, takeUpdateNotice, updateCommand } from "./updates.js"
 import { git, initGitRepo, runCli, tempDir, writeFile } from "./test-helpers.js"
 
 const installed = "a".repeat(40)
@@ -172,6 +172,78 @@ describe("updates", () => {
     assert.equal(requests, 0)
   })
 
+  test("notice shows an available update at most once a day per commit and names the update command", async () => {
+    await checkForUpdates(installed, availableFetcher(latest))
+    const now = Date.now()
+    const notice = await takeUpdateNotice(installed, now)
+    assert.match(notice ?? "", /^work bbbbbbb available \(installed aaaaaaa\)\. Update: /)
+    assert.ok(notice?.includes(updateCommand()))
+    assert.equal(await takeUpdateNotice(installed, now + 3_600_000), null)
+    assert.ok(await takeUpdateNotice(installed, now + 25 * 3_600_000))
+
+    const newer = "c".repeat(40)
+    await checkForUpdates(installed, availableFetcher(newer))
+    assert.match(await takeUpdateNotice(installed, now + 25 * 3_600_000 + 1) ?? "", /work ccccccc available/)
+
+    assert.match(await outdatedBuildHint(installed) ?? "", /^your work build may be outdated: work ccccccc available/)
+    process.env["WORK_NO_UPDATE_CHECK"] = "1"
+    assert.equal(await takeUpdateNotice(installed, now + 100 * 3_600_000), null)
+    assert.equal(await outdatedBuildHint(installed), null)
+  })
+
+  test("parallel commands show the notice once", async () => {
+    await checkForUpdates(installed, availableFetcher(latest))
+    const notices = await Promise.all(Array.from({ length: 20 }, () => takeUpdateNotice(installed)))
+    assert.equal(notices.filter(Boolean).length, 1)
+  })
+
+  test("no notice when current, unknown, or for another build", async () => {
+    assert.equal(await takeUpdateNotice(installed), null)
+    await checkForUpdates(installed, async () => Response.json({ sha: installed }))
+    assert.equal(await takeUpdateNotice(installed), null)
+    await checkForUpdates(installed, availableFetcher(latest))
+    assert.equal(await takeUpdateNotice("d".repeat(40)), null)
+    assert.equal(await takeUpdateNotice(null), null)
+  })
+
+  test("update command rebuilds the checkout and restarts workd; status prints it", async () => {
+    const checkout = await tempDir("work cli ")
+    await fs.mkdir(path.join(checkout, ".git"))
+    assert.equal(updateCommand(`${checkout}/`), `cd '${checkout}' && git pull && bun install && bun run build && work daemon stop && work daemon start`)
+    assert.match(updateCommand(await tempDir()), /^reinstall from https:\/\/github\.com\//)
+    const status = await checkForUpdates(installed, availableFetcher(latest))
+    assert.match(formatUpdateStatus(status, installed), /update with: .*bun run build/)
+  })
+
+  test("a long-lived checker follows the build installed on disk", async () => {
+    const directory = await tempDir()
+    const buildInfo = path.join(directory, "build-info.js")
+    await fs.writeFile(buildInfo, `export const buildCommit = "${installed}";\nexport const buildDirty = false;\n`)
+    assert.equal(installedBuildCommit(buildInfo), installed)
+    assert.equal(installedBuildCommit(path.join(directory, "missing.js")), null)
+
+    const checked: Array<string> = []
+    const fetcher: typeof fetch = async (url) => {
+      const href = String(url)
+      if (href.endsWith("/commits/main")) return Response.json({ sha: latest })
+      checked.push(href)
+      return Response.json({ status: "ahead" })
+    }
+    // workd was built from installed; the checkout was rebuilt since, so the reader returns the new build.
+    const rebuilt = "c".repeat(40)
+    await fs.writeFile(buildInfo, `export const buildCommit = "${rebuilt}";\n`)
+    const stop = startUpdateChecker(installed, fetcher, () => installedBuildCommit(buildInfo))
+    try {
+      await waitUntil(() => checked.some((href) => href.includes(`${rebuilt}...`)))
+      assert.equal(checked.some((href) => href.includes(`${installed}...`)), false)
+      const deadline = Date.now() + 2000
+      while (!await readUpdateStatus(rebuilt) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+      assert.equal((await readUpdateStatus(rebuilt))?.status, "available")
+    } finally {
+      stop()
+    }
+  })
+
   test("CLI exposes cached status without starting the daemon and validates arguments", async () => {
     const root = await tempDir()
     const stateRoot = process.env["WORK_STATE_ROOT"]!
@@ -187,6 +259,10 @@ describe("updates", () => {
     assert.match(help.stdout, /cached update status/)
   })
 })
+
+function availableFetcher(latestCommit: string): typeof fetch {
+  return async (url) => String(url).endsWith("/commits/main") ? Response.json({ sha: latestCommit }) : Response.json({ status: "ahead" })
+}
 
 async function waitUntil(predicate: () => boolean) {
   const deadline = Date.now() + 2000

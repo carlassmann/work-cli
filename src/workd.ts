@@ -13,7 +13,8 @@ import { daemonLockFile, daemonPidFile, daemonSocketFile, listWorkspaceStates, r
 import type { Result } from "./result.js"
 import type { DaemonCommand, DaemonResponse, DaemonResultType, DevConfig, Exposure, WorkspaceRecord, WorkspaceState } from "./types.js"
 import { DAEMON_PROTOCOL_VERSION } from "./types.js"
-import { startUpdateChecker } from "./updates.js"
+import { buildCommit } from "./build-info.js"
+import { installedBuildCommit, startUpdateChecker } from "./updates.js"
 import { worktreeFingerprint } from "./worktree-activity.js"
 
 const KNOWN_COMMAND_TYPES: ReadonlySet<string> = new Set(
@@ -63,7 +64,7 @@ if (!acquiredDaemonLock) process.exit(0)
 const daemonLock = acquiredDaemonLock as import("node:fs/promises").FileHandle
 for (const state of await listWorkspaceStates()) {
   for (const [command, record] of Object.entries(state.commands)) {
-    if (record.restart === "on-exit" && !record.idleStoppedAt) {
+    if (record.restart === "on-exit" && !record.idleStoppedAt && record.stopReason !== "ttl") {
       desired.set(key(state.project, state.workspace, command), {
         type: "tracked", project: state.project, workspace: state.workspace, command, environment: childEnvironment(),
       })
@@ -95,7 +96,7 @@ const server = net.createServer((socket) => {
 })
 
 server.listen(daemonSocketFile())
-const stopUpdateChecker = startUpdateChecker()
+const stopUpdateChecker = startUpdateChecker(buildCommit, fetch, () => installedBuildCommit() ?? buildCommit)
 
 let maintenanceTask: Promise<void> | null = null
 const maintenanceInterval = setInterval(() => {
@@ -216,7 +217,7 @@ async function handleCommand(command: DaemonCommand): Promise<Result<unknown>> {
         if (!state.ok) return state
         const existing = state.value?.commands[command.command]
         if (existing && (existing.exposure?.mode ?? "local") !== command.exposure.mode && await commandRuntimeStatus(existing) === "up") {
-          return { ok: false, error: { tag: "ProcessError", message: `command ${command.command} is tracked in ${existing.exposure?.mode ?? "local"} mode. Run work down ${command.workspace.workspace} before switching.` } } as const
+          return { ok: false, error: { tag: "ProcessError", message: `command ${command.command} is tracked in ${existing.exposure?.mode ?? "local"} mode. Rerun with --switch to restart it in ${command.exposure.mode} mode, or run work down ${command.workspace.workspace} first.` } } as const
         }
         const stop = await stopCommand(command.config.project, command.workspace.workspace, command.command, { syncExposures: false, environment: command.environment })
         if (!stop.ok) return stop
@@ -302,7 +303,8 @@ const activityCheckedAt = new Map<string, number>()
 async function expireCommands() {
   const timed = new Set<string>()
   for (const listed of await listWorkspaceStates()) {
-    if (!Object.values(listed.commands).some((record) => record.maxTtlSeconds)) continue
+    // Expired records stay for ps; only live timed commands need worktree checks.
+    if (!Object.values(listed.commands).some((record) => record.maxTtlSeconds && !record.exitedAt)) continue
     const workspaceKey = key(listed.project, listed.workspace, "")
     timed.add(workspaceKey)
     await serialize(workspaceLock(listed.project, listed.workspace), async () => {
@@ -316,7 +318,7 @@ async function expireCommands() {
         if (record.exitedAt || !commandTtlExpired(record)) continue
 
         desired.delete(key(listed.project, listed.workspace, id))
-        const stopped = await stopCommand(listed.project, listed.workspace, id)
+        const stopped = await stopCommand(listed.project, listed.workspace, id, { ttlExpired: true })
         if (!stopped.ok) debugLog("workd", `TTL stop ${listed.project}/${listed.workspace}/${id} failed: ${stopped.error.message}`)
       }
     })
@@ -329,7 +331,7 @@ async function expireCommands() {
 // TTL counts idle time: any change in the worktree restarts the window for every timed command in it.
 // The worktree is checked once a minute, and again right before a command would expire.
 async function recordWorktreeActivity(state: WorkspaceState, workspaceKey: string) {
-  const records = Object.values(state.commands).filter((record) => record.maxTtlSeconds)
+  const records = Object.values(state.commands).filter((record) => record.maxTtlSeconds && !record.exitedAt)
   const now = Date.now()
   const due = now - (activityCheckedAt.get(workspaceKey) ?? 0) >= ACTIVITY_CHECK_INTERVAL_MS
   if (!due && !records.some(commandTtlExpired)) return
@@ -409,7 +411,7 @@ async function reconcile() {
       }
       if (commandTtlExpired(record)) {
         desired.delete(targetKey)
-        return stopCommand(project, workspace, target.command, { environment: target.environment })
+        return stopCommand(project, workspace, target.command, { environment: target.environment, ttlExpired: true })
       }
       if (await commandRuntimeStatus(record) === "up") return { ok: true, value: { started: false } } as const
       if (target.type === "configured") {

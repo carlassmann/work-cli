@@ -121,7 +121,10 @@ before starting setup scripts or dev servers.
 Other Cloudflare variables, such as `CLOUDFLARE_API_TOKEN`, remain available to
 commands that need them. Once a workspace is running through Cloudflare,
 `work run`, `work restart`, and `work up` inherit that mode without another flag.
-Run `work down` before switching the workspace back to local mode.
+To switch modes, add `--switch` (`work up --local --switch`): it stops the
+workspace and starts its live commands again in the new mode. Without it `work`
+refuses, so a workspace that CI or another agent runs is never stopped by accident.
+`work ps` shows each command's mode; `work ps --json` has it as `mode`.
 `cloudflared tunnel create` stores credentials in its standard directory; `work`
 discovers them automatically.
 
@@ -194,7 +197,9 @@ Portless then registers `{command}-{workspace}-{project}.dev.example.com` next t
 the `.localhost` name and points it at `127.0.0.1` in `/etc/hosts`. Without it,
 use the `*.localhost` URLs on the machine itself. Like Cloudflare mode,
 the workspace keeps Tailscale mode for later `run`, `restart`, and `up` calls;
-run `work down` before switching back. In WorkOS or another OAuth provider, allow
+switch back with `--local --switch`. When another `tailscale serve` handler
+holds port 443, `work` names it and prints the commands that move it to 8443;
+a stale forward to a local port nothing listens on is taken over. In WorkOS or another OAuth provider, allow
 `https://*.dev.example.com` and the callback path.
 
 ## Example: a real workflow
@@ -284,15 +289,23 @@ and warn when it is another session's scope.
 show an unknown commit and skip update checks.
 
 workd checks GitHub's `main` at startup and hourly, without blocking process
-supervision or daemon startup. `work updates` reads the result from
-`~/.work-cli/updates.json` and shows when it was checked. Normal commands do no
-update-related disk or network I/O. Checks time out after five seconds per request;
+supervision or daemon startup. A long-running workd checks the build currently
+installed on disk, so a rebuild without a daemon restart is still covered.
+`work updates` reads the result from `~/.work-cli/updates.json`, shows when it was
+checked, and prints the update command (`git pull`, `bun install`, `bun run build`
+in the checkout, then a daemon restart). When an update is available, commands
+print `work <new> available (installed <old>). Update: …` on stderr, at
+most once a day per new commit. They read only the file workd caches, so
+they never wait on the network, and skip the notice for `--json`; an unknown flag or command error mentions
+the available update instead, since the flag may come from a newer build. Normal
+commands do no network I/O; they only read the cached status. Checks time out after five seconds per request;
 failed checks retain the last successful result and retry after an hour. A recent
 attempt also suppresses another check after a daemon restart. Cache entries belong
 to the installed commit, so another build cannot reuse an old "up to date" result.
 
 Start workd with `work daemon start` to enable checks. Stop/start it after rebuilding
-to load the new build. `WORK_NO_UPDATE_CHECK=1` disables checks when workd starts.
+to load the new build. `WORK_NO_UPDATE_CHECK=1` disables checks when workd starts,
+and the notice in any command.
 Checks report available updates; they do not install them.
 
 <!-- written with gpt-6 in codex -->
@@ -356,6 +369,11 @@ and `work logs` prints only the output since then. `-n 50` keeps the last lines,
 `--all` includes earlier runs. Logs stay readable after a crash: workd keeps the
 dead record with its exit code until the command starts again, `work stop`,
 `work down`, or `work prune`, so `work ps` shows `dead (exit 1, 12:04:31)`.
+It also says why a command without an exit code is gone: `stopped (idle 30m, …)`,
+`stopped (ttl 1h, …)`, `dead (reboot, …)`, or `dead (exit unknown, …)` when it died
+while no workd watched it (workd restarted or its session ended). `work up` and
+`work wait` repeat that reason, and `work wait` on a command that is not tracked
+says whether the workspace runs in another mode.
 
 Commands without a URL can say when they are ready:
 
