@@ -1793,10 +1793,11 @@ if (!result.ok) {
 
 await printUpdateNotice(argv)
 
-// Interactive only: agents and scripts parse stdout/stderr, and --json output must stay clean.
+// Agents see stderr too, so they learn about updates; --json callers often parse both streams.
+// Reads only the file workd caches, so the command never waits on the network.
 async function printUpdateNotice(args: ReadonlyArray<string>) {
   const command = args[0]
-  if (!process.stderr.isTTY || !command || args.includes("--json") || quietCommands.has(command)) return
+  if (!command || args.includes("--json") || quietCommands.has(command)) return
   const notice = await takeUpdateNotice().catch(() => null)
   if (notice) console.error(notice)
 }

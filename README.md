@@ -293,10 +293,10 @@ supervision or daemon startup. A long-running workd checks the build currently
 installed on disk, so a rebuild without a daemon restart is still covered.
 `work updates` reads the result from `~/.work-cli/updates.json`, shows when it was
 checked, and prints the update command (`git pull`, `bun install`, `bun run build`
-in the checkout, then a daemon restart). When an update is available, interactive
-commands print `work <new> available (installed <old>). Update: …` on stderr, at
-most once a day per new commit. They skip it for `--json` and when stderr is not a
-terminal, so agents' parsing is unaffected; an unknown flag or command error mentions
+in the checkout, then a daemon restart). When an update is available, commands
+print `work <new> available (installed <old>). Update: …` on stderr, at
+most once a day per new commit. They read only the file workd caches, so
+they never wait on the network, and skip the notice for `--json`; an unknown flag or command error mentions
 the available update instead, since the flag may come from a newer build. Normal
 commands do no network I/O; they only read the cached status. Checks time out after five seconds per request;
 failed checks retain the last successful result and retry after an hour. A recent

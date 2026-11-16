@@ -54,8 +54,8 @@ Usage:
   work updates
 
 workd checks main in the background at startup and hourly. Start it with work daemon start.
-When an update is available, interactive commands print a one-line notice on stderr
-at most once a day; --json output and non-terminal stderr never get it.
+When an update is available, commands print a one-line notice on stderr at most
+once a day (read from workd's cache, no network wait); --json output never gets it.
 WORK_NO_UPDATE_CHECK=1 disables background checks and the notice.
 work --version shows the commit baked into the installed build.`,
 
