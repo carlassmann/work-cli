@@ -30,7 +30,14 @@ const server = http2.createSecureServer({ ...credentials(config), allowHTTP1: tr
   }
 
   const forward = https.request({ ...target, method: request.method, path: request.url }, (upstreamResponse) => {
-    response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders(upstreamResponse.rawHeaders))
+    try {
+      response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders(upstreamResponse.rawHeaders))
+    } catch (cause) {
+      // HTTP/2 throws on headers HTTP/1.1 allows, such as a repeated content-type. Answer 502 instead of exiting.
+      for (const name of response.getHeaderNames()) response.removeHeader(name)
+      forward.destroy(cause instanceof Error ? cause : new Error(String(cause)))
+      return
+    }
     upstreamResponse.pipe(response)
   })
   forward.on("error", (cause) => {
@@ -39,8 +46,9 @@ const server = http2.createSecureServer({ ...credentials(config), allowHTTP1: tr
     response.end(`work preview unavailable: ${cause.message}\n`)
   })
   // HTTP/2 browsers cancel streams they no longer need; stop the upstream request with them.
+  // A reset HTTP/2 response counts as finished, so only an ended response means it completed.
   response.on("close", () => {
-    if (!response.writableFinished) forward.destroy()
+    if (!response.writableEnded) forward.destroy()
   })
   request.pipe(forward)
 })

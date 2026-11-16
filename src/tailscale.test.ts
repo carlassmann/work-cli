@@ -155,6 +155,22 @@ describe("tailscale", () => {
       })
     }
 
+    // A response HTTP/2 can't carry gets a 502 instead of taking the proxy down.
+    const duplicate = await getOverHttp2(proxyPort, "web-main-tilly.dev.example.test", ["/duplicate-content-type"])
+    assert.equal(duplicate.responses[0]!.status, 502)
+    assert.equal(proxy.exitCode, null)
+
+    // A cancelled HTTP/2 stream stops the upstream request.
+    const session = http2.connect(`https://127.0.0.1:${proxyPort}`, { servername: "web-main-tilly.dev.example.test", rejectUnauthorized: false })
+    t.after(() => session.close())
+    const hanging = session.request({ ":path": "/hang", ":authority": "web-main-tilly.dev.example.test" })
+    hanging.on("error", () => {})
+    hanging.end()
+    const hangState = async () => JSON.parse((await get(proxyPort, "web-main-tilly.dev.example.test", "/hang-state")).body) as { received: boolean; closed: boolean }
+    await waitFor(async () => (await hangState()).received)
+    hanging.close(http2.constants.NGHTTP2_CANCEL)
+    await waitFor(async () => (await hangState()).closed)
+
     const unknown = await get(proxyPort, "other.dev.example.test", "/")
     assert.equal(unknown.status, 404)
 
@@ -214,7 +230,18 @@ const fakePortless = `
 const fs = require("node:fs")
 const https = require("node:https")
 const [cert, key, port] = process.argv.slice(-3)
+const hang = { received: false, closed: false }
 const server = https.createServer({ cert: fs.readFileSync(cert), key: fs.readFileSync(key) }, (request, response) => {
+  if (request.url === "/hang") {
+    hang.received = true
+    response.on("close", () => { hang.closed = true })
+    return
+  }
+  if (request.url === "/hang-state") return response.end(JSON.stringify(hang))
+  if (request.url === "/duplicate-content-type") {
+    response.setHeader("content-type", ["text/html", "text/plain"])
+    return response.end("two types")
+  }
   response.setHeader("set-cookie", ["a=1", "b=2"])
   response.end(JSON.stringify({
     url: request.url,
