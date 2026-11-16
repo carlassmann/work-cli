@@ -182,7 +182,7 @@ export async function checkServePort(port: number, environment: NodeJS.ProcessEn
 }
 
 // A forward to a local port nobody listens on is left over from an earlier proxy (another
-// WORK_TAILSCALE_PORT or a crashed run); nothing can depend on it, so work takes it over.
+// WORK_TAILSCALE_PORT or a crashed run); work takes it over and says so.
 async function serveHolder(output: string, port: number): Promise<"none" | "ours" | "stale" | "foreign"> {
   const current = parseServeTarget(output)
   if (!current) return "none"
@@ -200,6 +200,7 @@ async function ensureServe(port: number, environment: NodeJS.ProcessEnv): Promis
   if (holder === "ours") return ok(undefined)
   if (holder === "foreign") return errResult("ConfigError", serveConflictMessage(status.value, target))
   if (holder === "stale") {
+    console.error(`taking over tailnet port 443 from ${current}: nothing listens there`)
     try {
       await exec("tailscale", ["serve", `--tcp=${SERVE_PORT}`, "off"], { env: childEnvironment(environment), timeout: 30_000 })
     } catch (cause) {
@@ -241,9 +242,15 @@ async function serveStatus(environment: NodeJS.ProcessEnv): Promise<Result<strin
   }
 }
 
-function isPortListening(port: number): Promise<boolean> {
+// localhost forwards may land on either loopback family, e.g. a Vite server bound only to ::1.
+async function isPortListening(port: number): Promise<boolean> {
+  const results = await Promise.all(["127.0.0.1", "::1"].map((host) => acceptsConnections(host, port)))
+  return results.includes(true)
+}
+
+function acceptsConnections(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.connect({ host: "127.0.0.1", port, timeout: 1000 })
+    const socket = net.connect({ host, port, timeout: 1000 })
     const done = (listening: boolean) => {
       socket.destroy()
       resolve(listening)

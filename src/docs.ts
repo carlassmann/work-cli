@@ -542,7 +542,7 @@ export function docsText(topic: string | undefined): Result<string> {
     return ok(docs.overview + `\n\nTopics:\n  ${docsTopics.join("\n  ")}\n\nRun: work docs <topic>`)
   }
 
-  if (topic in docs) {
+  if (Object.hasOwn(docs, topic)) {
     return ok(docs[topic as DocsTopic])
   }
 

@@ -8,7 +8,7 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
-import { parseServeTarget, serveConflictMessage, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
+import { checkServePort, parseServeTarget, serveConflictMessage, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -62,6 +62,21 @@ describe("tailscale", () => {
     }
     const missing = await tailscaleExposure({ XDG_CONFIG_HOME: config })
     assert.match(missing.ok ? "" : missing.error.message, /work tailscale setup/)
+  })
+
+  test("a forward to a server listening only on ::1 is not taken over", async (t) => {
+    const server = net.createServer()
+    await new Promise<void>((resolve) => server.listen(0, "::1", resolve))
+    t.after(() => server.close())
+    const port = (server.address() as net.AddressInfo).port
+    const bin = await tempDir()
+    await fs.writeFile(path.join(bin, "tailscale"), `#!/bin/sh\necho '${JSON.stringify({ TCP: { "443": { TCPForward: `localhost:${port}` } } })}'\n`, { mode: 0o755 })
+    const environment = { ...process.env, PATH: `${bin}:${process.env["PATH"]}` }
+
+    const held = await checkServePort(47443, environment)
+    assert.match(held.ok ? "" : held.error.message, new RegExp(`forwards tailnet port 443 to localhost:${port}`))
+    server.close()
+    assert.ok((await checkServePort(47443, environment)).ok)
   })
 
   test("finds what tailscale serve forwards on port 443", () => {

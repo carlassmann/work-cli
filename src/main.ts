@@ -72,6 +72,11 @@ function applyCwdFlag(args: ReadonlyArray<string>): Result<Array<string>> {
       remaining.push(arg)
       continue
     }
+    // After a value flag (work wait web --log -C), -C is that flag's value, not a directory.
+    if (inline === undefined && args[i + 1]?.startsWith("-")) {
+      remaining.push(arg)
+      continue
+    }
     const directory = inline ?? args[++i]
     if (!directory) return errResult("CLIError", `missing value for ${arg}`)
     try {
@@ -87,7 +92,7 @@ async function main(rawArgs: ReadonlyArray<string>): Promise<Result<void>> {
   const withoutCwd = rawArgs[0] === "_complete" ? ok([...rawArgs]) : applyCwdFlag(rawArgs)
   if (!withoutCwd.ok) return withoutCwd
   const args = withoutCwd.value
-  if (args[0] && commandAliases[args[0]]) args[0] = commandAliases[args[0]]
+  if (args[0] && Object.hasOwn(commandAliases, args[0])) args[0] = commandAliases[args[0]]!
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
     console.log(rootHelp())
@@ -101,7 +106,7 @@ async function main(rawArgs: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (args[0] === "help") {
-    const topic = args[1] ?? ""
+    const topic = args[1] && Object.hasOwn(commandAliases, args[1]) ? commandAliases[args[1]]! : args[1] ?? ""
     if (topic === "--help" || topic === "-h") {
       console.log(commandHelp("help"))
       return ok(undefined)
@@ -181,7 +186,8 @@ async function dispatch(name: string, args: ReadonlyArray<string>): Promise<Resu
     return runComplete(args)
   }
 
-  const handler = (commandHandlers() as Record<string, CommandHandler>)[name]
+  const handlers = commandHandlers() as Record<string, CommandHandler>
+  const handler = Object.hasOwn(handlers, name) ? handlers[name] : undefined
 
   if (!handler) {
     return errResult("CLIError", `${withSuggestion(`unknown command: ${name}`, name, [...commandNames])} Run 'work --help'.`)
@@ -269,7 +275,7 @@ async function runUp(args: ReadonlyArray<string>): Promise<Result<void>> {
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
-  if (workspaceName && !create && ctx.value.config.commands[workspaceName] && !await workspaceExists(ctx.value, workspaceName)) {
+  if (workspaceName && !create && Object.hasOwn(ctx.value.config.commands, workspaceName) && !await workspaceExists(ctx.value, workspaceName)) {
     return errResult("CLIError", `${workspaceName} is a command in work.config.js, not a workspace. Did you mean: work run ${workspaceName}? (work up ${workspaceName} --create makes a workspace of that name)`)
   }
 
@@ -392,7 +398,7 @@ async function runRun(args: ReadonlyArray<string>): Promise<Result<void>> {
   const ctx = await loadProjectContext()
   if (!ctx.ok) return ctx
 
-  const commandConfig = ctx.value.config.commands[command]
+  const commandConfig = configuredCommand(ctx.value.config, command)
   if (!commandConfig) {
     const configured = Object.keys(ctx.value.config.commands)
     return errResult("CLIError", `${withSuggestion(`unknown command: ${command}`, command, configured)}\nwork run starts a command from work.config.js (${configured.join(", ") || "none configured"}); run scripts directly.`)
@@ -422,8 +428,9 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
   const positional = parsed.value.positional
   const ctx = await loadProjectContext()
   if (!ctx.ok || projectArg) {
-    if (parsed.value.flags.tailscale) {
-      return errResult("CLIError", "--tailscale needs the project config; tracked restarts keep their routing mode")
+    const modeFlag = (["tailscale", "cloudflare", "local", "switch"] as const).find((flag) => parsed.value.flags[flag])
+    if (modeFlag) {
+      return errResult("CLIError", `--${modeFlag} needs the project config; tracked restarts keep their routing mode. Run it from the worktree (or with -C <worktree>)`)
     }
 
     const target = await trackedWorkspaceCommands(positional, parsed.value.flags)
@@ -475,7 +482,7 @@ async function runRestart(args: ReadonlyArray<string>): Promise<Result<void>> {
 
   const entries: Array<[string, DevConfig["commands"][string]]> = []
   for (const command of target.commands) {
-    const commandConfig = ctx.value.config.commands[command]
+    const commandConfig = configuredCommand(ctx.value.config, command)
     if (!commandConfig) {
       return errResult("CLIError", await unknownTrackedCommandMessage(ctx.value.config.project, workspace.value.workspace, command, Object.keys(ctx.value.config.commands)))
     }
@@ -569,9 +576,14 @@ async function planModeSwitch(
 
   const requested = new Set(entries.map(([id]) => id))
   const restarted = live
-    .filter((record) => !requested.has(record.id) && ctx.config.commands[record.id])
+    .filter((record) => !requested.has(record.id) && configuredCommand(ctx.config, record.id))
     .map((record): [string, DevConfig["commands"][string]] => [record.id, ctx.config.commands[record.id]!])
   return ok({ from: liveMode, entries: [...entries, ...restarted] })
+}
+
+// Command ids come from users and agents; "constructor" must not resolve through the prototype.
+function configuredCommand(config: DevConfig, id: string) {
+  return Object.hasOwn(config.commands, id) ? config.commands[id] : undefined
 }
 
 async function validateTimeouts(config: DevConfig): Promise<Result<void>> {
@@ -888,14 +900,14 @@ async function runLogs(args: ReadonlyArray<string>): Promise<Result<void>> {
 
 async function runUrls(args: ReadonlyArray<string>): Promise<Result<void>> {
   const parsed = parseArgs(args, {
-    flags: { project: valueFlag("p"), workspace: valueFlag("w"), json: booleanFlag(), tailscale: booleanFlag(), cloudflare: booleanFlag() },
+    flags: { project: valueFlag("p"), workspace: valueFlag("w"), json: booleanFlag(), tailscale: booleanFlag(), cloudflare: booleanFlag(), local: booleanFlag() },
   })
   if (!parsed.ok) return parsed
 
   const workspaceResult = workspaceArgument(parsed.value.positional, parsed.value.flags.workspace)
   if (!workspaceResult.ok) return workspaceResult
   const workspaceArg = workspaceResult.value
-  const requestedMode = parsed.value.flags.tailscale ? "tailscale" : parsed.value.flags.cloudflare ? "cloudflare" : null
+  const requestedMode = parsed.value.flags.tailscale ? "tailscale" : parsed.value.flags.cloudflare ? "cloudflare" : parsed.value.flags.local ? "local" : null
   const ctx = await loadProjectContext()
   if (!ctx.ok || parsed.value.flags.project) {
     const states = await findWorkspaceStates({ project: parsed.value.flags.project, workspace: workspaceArg })
@@ -1773,7 +1785,7 @@ async function resolveWorkspace(
 
 function missingWorkspaceMessage(config: DevConfig, workspace: string, usage: string | undefined) {
   const message = `workspace ${workspace} does not exist`
-  return usage && config.commands[workspace] ? `${message}; ${workspace} is a command id. Usage: ${usage}` : message
+  return usage && configuredCommand(config, workspace) ? `${message}; ${workspace} is a command id. Usage: ${usage}` : message
 }
 
 async function confirm(question: string) {
@@ -1790,6 +1802,7 @@ async function confirm(question: string) {
 
 // Runs last so every module-level constant is initialized before a command reads it.
 const argv = process.argv.slice(2)
+let updateHintShown = false
 const result = await main(argv)
 
 if (!result.ok) {
@@ -1800,20 +1813,26 @@ if (!result.ok) {
   }
 
   // An unknown flag or command is often one a newer build added, as on hosts that run an old checkout.
-  if (result.error.tag === "CLIError" && /^unknown (flag|command)/.test(result.error.message)) {
+  if (result.error.tag === "CLIError" && isUnknownWorkSyntax(result.error.message)) {
     const hint = await outdatedBuildHint()
     if (hint) console.error(hint)
+    updateHintShown = Boolean(hint)
   }
 
   process.exitCode = 1
 }
 
-await printUpdateNotice(argv)
+if (!updateHintShown) await printUpdateNotice(argv)
+
+// Typos in work.config.js command names are not a sign of an old build.
+function isUnknownWorkSyntax(message: string) {
+  return message.startsWith("unknown flag") || (message.startsWith("unknown command") && message.includes("Run 'work --help'"))
+}
 
 // Agents see stderr too, so they learn about updates; --json callers often parse both streams.
 // Reads only the file workd caches, so the command never waits on the network.
 async function printUpdateNotice(args: ReadonlyArray<string>) {
-  const command = args[0]
+  const command = args.find((arg, index) => !arg.startsWith("-") && !["-C", "--cwd"].includes(args[index - 1] ?? ""))
   if (!command || args.includes("--json") || quietCommands.has(command)) return
   const notice = await takeUpdateNotice().catch(() => null)
   if (notice) console.error(notice)

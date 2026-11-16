@@ -649,6 +649,6 @@ export function commandHelp(name: string) {
 }
 
 export function helpSection(name: string): HelpSection | null {
-  if (name in sections) return name as HelpSection
+  if (Object.hasOwn(sections, name)) return name as HelpSection
   return null
 }

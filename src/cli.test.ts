@@ -729,6 +729,17 @@ describe("cli", () => {
     }
   })
 
+  test("names from Object.prototype are not commands", async () => {
+    const root = await tempDir()
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: { web: { run: "exec sleep 30" } } }`)
+    for (const args of [["constructor"], ["run", "constructor"], ["up", "toString", "--no-create"], ["help", "constructor"]]) {
+      const result = await runCli(args, { cwd: root })
+      assert.equal(result.exitCode, 1, args.join(" "))
+      assert.doesNotMatch(result.stderr, /native code|TypeError|is a command in work\.config\.js/, args.join(" "))
+    }
+  })
+
   test("wait matches a log line from the current run", async (t) => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
