@@ -3,9 +3,13 @@
 // URL, so apps see the same Host they see locally plus X-Forwarded-Host/Proto.
 import fs from "node:fs"
 import http from "node:http"
+import http2 from "node:http2"
 import https from "node:https"
 import type { Duplex } from "node:stream"
 import type { TailnetProxyConfig } from "./tailscale.js"
+
+// HTTP/2 forbids these in responses; HTTP/1.1 sets its own per connection.
+const connectionHeaders = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"])
 
 const configFile = process.argv[2]
 if (!configFile) {
@@ -14,20 +18,29 @@ if (!configFile) {
 }
 
 let config = readConfig(configFile)
-const server = https.createServer(credentials(config), (request, response) => {
+// Browsers open at most six HTTP/1.1 connections per host, and a dev server sends every
+// module as its own request, so over the tailnet a page waits round trip after round trip.
+// HTTP/2 sends them all over one connection. WebSockets still arrive as HTTP/1.1 upgrades.
+const server = http2.createSecureServer({ ...credentials(config), allowHTTP1: true }, (request, response) => {
+  // With allowHTTP1, HTTP/1.1 requests arrive as http.IncomingMessage/ServerResponse; they have every member used here.
   const target = upstream(request)
   if (!target) {
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end(`No work preview for ${request.headers.host ?? "this host"}\n`)
+    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end(`No work preview for ${publicHost(request) ?? "this host"}\n`)
     return
   }
 
   const forward = https.request({ ...target, method: request.method, path: request.url }, (upstreamResponse) => {
-    response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.rawHeaders)
+    response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders(upstreamResponse.rawHeaders))
     upstreamResponse.pipe(response)
   })
   forward.on("error", (cause) => {
+    if (response.writableEnded) return
     if (!response.headersSent) response.writeHead(502, { "content-type": "text/plain; charset=utf-8" })
     response.end(`work preview unavailable: ${cause.message}\n`)
+  })
+  // HTTP/2 browsers cancel streams they no longer need; stop the upstream request with them.
+  response.on("close", () => {
+    if (!response.writableFinished) forward.destroy()
   })
   request.pipe(forward)
 })
@@ -94,15 +107,17 @@ function reload() {
   }
 }
 
-function upstream(request: http.IncomingMessage): https.RequestOptions | null {
-  const publicHost = request.headers.host
-  if (!publicHost) return null
-  const hostname = publicHost.replace(/:\d+$/, "").toLowerCase()
+function upstream(request: http.IncomingMessage | http2.Http2ServerRequest): https.RequestOptions | null {
+  const host = publicHost(request)
+  if (!host) return null
+  const hostname = host.replace(/:\d+$/, "").toLowerCase()
   // Host comes from the client, so only own keys count; "constructor" must not resolve to Object.prototype.
   if (!Object.hasOwn(config.routes, hostname)) return null
   const url = parseUrl(config.routes[hostname])
   if (!url) return null
   const forwardedFor = [request.headers["x-forwarded-for"], request.socket.remoteAddress].filter(Boolean).join(", ")
+  // Portless gets HTTP/1.1, which has no pseudo-headers (":path", ":authority", ...).
+  const headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) => !name.startsWith(":")))
   return {
     host: "127.0.0.1",
     port: Number(url.port || config.portlessPort || 443),
@@ -110,13 +125,31 @@ function upstream(request: http.IncomingMessage): https.RequestOptions | null {
     // Portless signs local certificates with its own CA; the hop never leaves loopback.
     rejectUnauthorized: false,
     headers: {
-      ...request.headers,
+      ...headers,
       host: url.host,
-      "x-forwarded-host": publicHost,
+      "x-forwarded-host": host,
       "x-forwarded-proto": "https",
       "x-forwarded-for": forwardedFor,
     },
   }
+}
+
+// HTTP/2 requests carry the host in ":authority" instead of a Host header.
+function publicHost(request: http.IncomingMessage | http2.Http2ServerRequest) {
+  const authority = request.headers[":authority"] ?? request.headers.host
+  return typeof authority === "string" && authority !== "" ? authority : null
+}
+
+function responseHeaders(rawHeaders: Array<string>) {
+  const headers: Record<string, string | Array<string>> = {}
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index]!.toLowerCase()
+    const value = rawHeaders[index + 1]!
+    if (connectionHeaders.has(name)) continue
+    const previous = headers[name]
+    headers[name] = previous === undefined ? value : [...(Array.isArray(previous) ? previous : [previous]), value]
+  }
+  return headers
 }
 
 function parseUrl(value: unknown) {

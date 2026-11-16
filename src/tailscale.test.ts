@@ -1,6 +1,7 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
+import http2 from "node:http2"
 import https from "node:https"
 import net from "node:net"
 import path from "node:path"
@@ -139,6 +140,21 @@ describe("tailscale", () => {
       servername: "web-main-tilly.localhost",
     })
 
+    // Browsers get HTTP/2, which carries the host in ":authority" and forbids hop-by-hop response headers.
+    const multiplexed = await getOverHttp2(proxyPort, "web-main-tilly.dev.example.test", ["/a", "/b", "/c"])
+    assert.equal(multiplexed.protocol, "h2")
+    for (const [index, response] of multiplexed.responses.entries()) {
+      assert.equal(response.status, 200)
+      assert.deepEqual(response.cookies, ["a=1", "b=2"])
+      assert.deepEqual(JSON.parse(response.body), {
+        url: ["/a", "/b", "/c"][index],
+        host: "web-main-tilly.localhost",
+        forwardedHost: "web-main-tilly.dev.example.test",
+        forwardedProto: "https",
+        servername: "web-main-tilly.localhost",
+      })
+    }
+
     const unknown = await get(proxyPort, "other.dev.example.test", "/")
     assert.equal(unknown.status, 404)
 
@@ -199,6 +215,7 @@ const fs = require("node:fs")
 const https = require("node:https")
 const [cert, key, port] = process.argv.slice(-3)
 const server = https.createServer({ cert: fs.readFileSync(cert), key: fs.readFileSync(key) }, (request, response) => {
+  response.setHeader("set-cookie", ["a=1", "b=2"])
   response.end(JSON.stringify({
     url: request.url,
     host: request.headers.host,
@@ -239,6 +256,30 @@ async function waitFor(check: () => boolean | Promise<boolean>) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("timed out")
+}
+
+async function getOverHttp2(port: number, host: string, paths: Array<string>) {
+  const session = http2.connect(`https://127.0.0.1:${port}`, { servername: host, rejectUnauthorized: false })
+  try {
+    const responses = await Promise.all(paths.map((requestPath) => new Promise<{ status: number; cookies: unknown; body: string }>((resolve, reject) => {
+      const stream = session.request({ ":path": requestPath, ":authority": host })
+      let status = 0
+      let cookies: unknown
+      let body = ""
+      stream.on("response", (headers) => {
+        status = Number(headers[":status"])
+        cookies = headers["set-cookie"]
+      })
+      stream.on("data", (chunk: Buffer) => { body += chunk.toString() })
+      stream.on("end", () => resolve({ status, cookies, body }))
+      stream.on("error", reject)
+      session.on("error", reject)
+      stream.end()
+    })))
+    return { protocol: session.alpnProtocol, responses }
+  } finally {
+    session.close()
+  }
 }
 
 function get(port: number, host: string, requestPath: string) {
