@@ -218,8 +218,9 @@ Examples:
 
 Wait until a tracked command is ready, for up to 60 seconds unless --timeout
 says otherwise. Routed commands are ready when their URL answers with HTTP 2xx or 3xx.
-Redirects are not followed. Prints the URL once it answers. With --tailscale it
-checks the local URL, since this machine cannot reach its own tailnet URL.
+Redirects are not followed. Prints the URL once it answers. It checks the local
+*.localhost URL in every mode: this machine cannot reach its own tailnet URL,
+and Cloudflare Access answers a Cloudflare URL with a login redirect.
 Commands with ready: { log: "<regex>" } in work.config.js, or --log, are ready
 once a line of the current run's log matches; without a URL this prints that line.
 
