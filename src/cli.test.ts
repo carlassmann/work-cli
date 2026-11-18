@@ -674,12 +674,12 @@ describe("cli", () => {
     const address = (server: http.Server) => `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`
     await initGitRepo(root)
     await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    const exposure = { mode: "cloudflare", machine: "box", domain: "example.com", tunnelId: "00000000-0000-0000-0000-000000000000", credentialsFile: "credentials.json" }
     await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
-      project: "tilly", workspace: "main", branch: "main", root,
-      exposure: { mode: "cloudflare", machine: "box", domain: "example.com", tunnelId: "00000000-0000-0000-0000-000000000000", credentialsFile: "credentials.json" },
+      project: "tilly", workspace: "main", branch: "main", root, exposure,
       commands: { web: {
         id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root, log: path.join(root, "web.log"),
-        url: address(edge), localUrl: address(local), startedAt: new Date().toISOString(), pid: sleeper.pid!,
+        url: address(edge), localUrl: address(local), exposure, startedAt: new Date().toISOString(), pid: sleeper.pid!,
       } },
     }))
 
