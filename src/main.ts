@@ -6,7 +6,7 @@ import { createRequire } from "node:module"
 import { Writable } from "node:stream"
 import { stdin as input, stdout as output } from "node:process"
 import { cloudflareExposure } from "./cloudflare.js"
-import { checkServePort, tailscaleExposure } from "./tailscale.js"
+import { checkServePort, DEFAULT_SERVE_PORT, isServePort, tailscaleByDefault, tailscaleExposure } from "./tailscale.js"
 import { runTailscaleSetup, tailscaleDoctorLine } from "./tailscale-setup.js"
 import { buildCommit, buildDirty } from "./build-info.js"
 import { commandNames } from "./commands.js"
@@ -513,7 +513,7 @@ async function startConfigured(
   const timeouts = await validateTimeouts(ctx.config)
   if (!timeouts.ok) return timeouts
   if (exposure.mode === "tailscale" && entries.some(([, command]) => command.route)) {
-    const serve = await checkServePort(exposure.port, environment)
+    const serve = await checkServePort(exposure.port, exposure.servePort ?? DEFAULT_SERVE_PORT, environment)
     if (!serve.ok) return serve
   }
   const portless = await ensurePortless(Object.fromEntries(entries))
@@ -1092,8 +1092,8 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (!record.url) return ok(undefined)
-  // The local URL reaches the command itself: a tailnet URL resolves to this machine's tailnet address, which only
-  // other devices reach, and a Cloudflare URL passes the edge, where Access answers with a login redirect on its own.
+  // The local URL reaches the command itself: a tailnet URL resolves to this machine's tailnet address, which outside
+  // Linux only other devices reach, and a Cloudflare URL passes the edge, where Access answers with a login redirect on its own.
   const probeUrl = record.localUrl ?? record.url
   const ready = await waitForUrl(probeUrl, Math.max(1, deadline - performance.now()), isAlive)
   if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. ${logsHint}`)
@@ -1121,10 +1121,10 @@ function logPattern(source: string, field: string): Result<RegExp> {
 }
 
 async function runTailscale(args: ReadonlyArray<string>): Promise<Result<void>> {
-  const parsed = parseArgs(args, { flags: { domain: valueFlag(), yes: booleanFlag("y") } })
+  const parsed = parseArgs(args, { flags: { domain: valueFlag(), "serve-port": valueFlag(), default: booleanFlag(), "no-default": booleanFlag(), yes: booleanFlag("y") } })
   if (!parsed.ok) return parsed
   const [subcommand, ...rest] = parsed.value.positional
-  if (subcommand !== "setup") return errResult("CLIError", "usage: work tailscale setup [--domain <domain>] [--yes]")
+  if (subcommand !== "setup") return errResult("CLIError", "usage: work tailscale setup [--domain <domain>] [--serve-port <port>] [--default | --no-default] [--yes]")
   const extra = unexpectedPositional(rest, 0)
   if (extra) return extra
 
@@ -1134,8 +1134,16 @@ async function runTailscale(args: ReadonlyArray<string>): Promise<Result<void>> 
   const environment = root.ok ? await loadWorkspaceEnvironment(root.value, root.value) : ok(childEnvironment())
   if (!environment.ok) return environment
 
+  const servePortFlag = parsed.value.flags["serve-port"]
+  const servePort = servePortFlag === undefined ? undefined : Number(servePortFlag)
+  if (servePort !== undefined && !isServePort(servePort)) return errResult("CLIError", `--serve-port must be a port between 1 and 65535, got ${servePortFlag}`)
+
+  if (parsed.value.flags.default && parsed.value.flags["no-default"]) return errResult("CLIError", "choose --default or --no-default, not both")
+
   return runTailscaleSetup({
     domain: parsed.value.flags.domain,
+    servePort,
+    byDefault: parsed.value.flags.default ? true : parsed.value.flags["no-default"] ? false : undefined,
     environment: { ...process.env, ...environment.value },
     log: (line) => console.log(line),
     prompts: {
@@ -1650,6 +1658,12 @@ async function resolveExposure(
   const mode = state.value?.exposure?.mode
   if (mode === "cloudflare") return cloudflareExposure(environment)
   if (mode === "tailscale") return tailscaleExposure(environment)
+  // A machine set up with work tailscale setup --default gets tailnet URLs without the flag,
+  // except in a workspace that is still running locally.
+  if (await tailscaleByDefault(environment)) {
+    const statuses = await Promise.all(Object.values(state.value?.commands ?? {}).map(commandRuntimeStatus))
+    if (!statuses.includes("up")) return tailscaleExposure(environment)
+  }
   return ok({ mode: "local" })
 }
 

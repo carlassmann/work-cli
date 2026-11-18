@@ -9,7 +9,8 @@ import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { certificate, privateKey } from "./test-certificate.js"
 import { tempDir } from "./test-helpers.js"
-import { checkServePort, parseServeTarget, serveConflictMessage, tailscaleExposure, tailscaleHostname } from "./tailscale.js"
+import { checkServePort, parseServeTarget, serveConflictMessage, tailscaleByDefault, tailscaleExposure, tailscaleHost, tailscaleHostname } from "./tailscale.js"
+import { publicUrl } from "./portless.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -26,7 +27,7 @@ describe("tailscale", () => {
     })
     assert.deepEqual(exposure, {
       ok: true,
-      value: { mode: "tailscale", domain: "dev.example.com", certFile: "/certs/fullchain.pem", keyFile: "/certs/key.pem", port: 47443 },
+      value: { mode: "tailscale", domain: "dev.example.com", certFile: "/certs/fullchain.pem", keyFile: "/certs/key.pem", port: 47443, servePort: 443 },
     })
     assert.equal(tailscaleHostname("web-feature-x-tilly", exposure.ok ? exposure.value : { mode: "local" }), "web-feature-x-tilly.dev.example.com")
   })
@@ -46,8 +47,48 @@ describe("tailscale", () => {
         certFile: path.join(config, "work", "tailscale", "dev.example.com.fullchain.pem"),
         keyFile: path.join(config, "work", "tailscale", "dev.example.com.key.pem"),
         port: 47443,
+        servePort: 443,
       },
     })
+  })
+
+  test("reads the tailnet serve port from setup or the environment and puts it in the URL", async (t) => {
+    const config = await tempDir()
+    t.after(() => fs.rm(config, { recursive: true, force: true }))
+    await fs.mkdir(path.join(config, "work"))
+    await fs.writeFile(path.join(config, "work", "config.json"), JSON.stringify({ tailscale: { domain: "dev.example.com", servePort: 9443 } }))
+
+    const saved = await tailscaleExposure({ XDG_CONFIG_HOME: config })
+    assert.equal(saved.ok && saved.value.mode === "tailscale" ? saved.value.servePort : null, 9443)
+    const exposure = saved.ok ? saved.value : { mode: "local" as const }
+    assert.equal(tailscaleHost("web-feature-x-tilly", exposure), "web-feature-x-tilly.dev.example.com:9443")
+    const command = { command: "astro dev", route: true as const }
+    assert.equal(
+      publicUrl({ project: "tilly", commands: { web: command } }, "feature-x", "web", command, exposure, 443),
+      "https://web-feature-x-tilly.dev.example.com:9443",
+    )
+
+    const overridden = await tailscaleExposure({ XDG_CONFIG_HOME: config, WORK_TAILSCALE_SERVE_PORT: "443" })
+    const plain = overridden.ok ? overridden.value : { mode: "local" as const }
+    assert.equal(tailscaleHost("web-feature-x-tilly", plain), "web-feature-x-tilly.dev.example.com")
+    // Records from before servePort existed mean 443.
+    assert.equal(tailscaleHost("web-a-b", { mode: "tailscale", domain: "dev.example.com", certFile: "c", keyFile: "k", port: 47443 }), "web-a-b.dev.example.com")
+
+    for (const bad of ["0", "70000", "x"]) {
+      const exposure = await tailscaleExposure({ XDG_CONFIG_HOME: config, WORK_TAILSCALE_SERVE_PORT: bad })
+      assert.equal(exposure.ok, false, bad)
+    }
+  })
+
+  test("uses tailnet URLs by default only when setup saved it or the environment says so", async (t) => {
+    const config = await tempDir()
+    t.after(() => fs.rm(config, { recursive: true, force: true }))
+    assert.equal(await tailscaleByDefault({ XDG_CONFIG_HOME: config }), false)
+    await fs.mkdir(path.join(config, "work"))
+    await fs.writeFile(path.join(config, "work", "config.json"), JSON.stringify({ tailscale: { domain: "dev.example.com", default: true } }))
+    assert.equal(await tailscaleByDefault({ XDG_CONFIG_HOME: config }), true)
+    assert.equal(await tailscaleByDefault({ XDG_CONFIG_HOME: config, WORK_TAILSCALE_DEFAULT: "0" }), false)
+    assert.equal(await tailscaleByDefault({ XDG_CONFIG_HOME: config, WORK_TAILSCALE_DEFAULT: "1" }), true)
   })
 
   test("rejects a missing or unusable domain and a privileged proxy port", async (t) => {
@@ -74,10 +115,10 @@ describe("tailscale", () => {
     await fs.writeFile(path.join(bin, "tailscale"), `#!/bin/sh\necho '${JSON.stringify({ TCP: { "443": { TCPForward: `localhost:${port}` } } })}'\n`, { mode: 0o755 })
     const environment = { ...process.env, PATH: `${bin}:${process.env["PATH"]}` }
 
-    const held = await checkServePort(47443, environment)
+    const held = await checkServePort(47443, 443, environment)
     assert.match(held.ok ? "" : held.error.message, new RegExp(`forwards tailnet port 443 to localhost:${port}`))
     server.close()
-    assert.ok((await checkServePort(47443, environment)).ok)
+    assert.ok((await checkServePort(47443, 443, environment)).ok)
   })
 
   test("finds what tailscale serve forwards on port 443", () => {
@@ -85,6 +126,8 @@ describe("tailscale", () => {
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "8443": { HTTPS: true } } })), null)
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:47443" } } })), "127.0.0.1:47443")
     assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { HTTPS: true } } })), "another tailscale serve handler")
+    assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { HTTPS: true }, "9443": { TCPForward: "127.0.0.1:47443" } } }), 9443), "127.0.0.1:47443")
+    assert.equal(parseServeTarget(JSON.stringify({ TCP: { "443": { HTTPS: true } } }), 9443), null)
   })
 
   test("a port 443 conflict names the handler and the commands that free it", () => {
@@ -99,6 +142,10 @@ describe("tailscale", () => {
     assert.match(message, /uses tailnet port 443 for \/ -> http:\/\/127\.0\.0\.1:3000, \/docs -> \/srv\/docs;/)
     assert.match(message, /tailscale serve --https=443 off && tailscale serve --bg --https=8443 http:\/\/127\.0\.0\.1:3000 && tailscale serve --bg --https=8443 --set-path=\/docs \/srv\/docs/)
     assert.doesNotMatch(message, /9000/)
+
+    const onServePort = serveConflictMessage(https, "127.0.0.1:47443", 8443)
+    assert.match(onServePort, /uses tailnet port 8443 for \/ -> http:\/\/127\.0\.0\.1:9000;/)
+    assert.match(onServePort, /tailscale serve --https=8443 off && tailscale serve --bg --https=9443 http:\/\/127\.0\.0\.1:9000/)
 
     const forward = serveConflictMessage(JSON.stringify({ TCP: { "443": { TCPForward: "127.0.0.1:5000" } } }), "127.0.0.1:47443")
     assert.match(forward, /forwards tailnet port 443 to 127\.0\.0\.1:5000, which is in use/)
