@@ -413,7 +413,7 @@ describe("cli", () => {
       commands: {
         web: {
           id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root,
-          log: path.join(root, "web.log"), url: "https://web-main-tilly.localhost", startedAt, pid,
+          log: path.join(root, "web.log"), url: "https://web-main-tilly.example.com", localUrl: "https://web-main-tilly.localhost", startedAt, pid,
           env: { API_TOKEN: "secret" },
         },
         worker: {
@@ -427,14 +427,14 @@ describe("cli", () => {
     assert.equal(ps.exitCode, 0)
     assert.equal(ps.stderr, "")
     assert.deepEqual(JSON.parse(ps.stdout), [
-      { project: "tilly", workspace: "main", command: "web", status: "up", mode: "local", pid, url: "https://web-main-tilly.localhost", exitCode: null, exitSignal: null, exitedAt: null, reason: null, reasonText: null },
+      { project: "tilly", workspace: "main", command: "web", status: "up", mode: "local", pid, url: "https://web-main-tilly.example.com", exitCode: null, exitSignal: null, exitedAt: null, reason: null, reasonText: null },
       { project: "tilly", workspace: "main", command: "worker", status: "up", mode: "local", pid, url: null, exitCode: null, exitSignal: null, exitedAt: null, reason: null, reasonText: null },
     ])
 
     const urls = await runCli(["urls", "--json"], { cwd: root, stateRoot })
     assert.equal(urls.exitCode, 0)
     assert.deepEqual(JSON.parse(urls.stdout), [
-      { project: "tilly", workspace: "main", command: "web", url: "https://web-main-tilly.localhost" },
+      { project: "tilly", workspace: "main", command: "web", url: "https://web-main-tilly.example.com", localUrl: "https://web-main-tilly.localhost" },
     ])
 
     const empty = await runCli(["urls", "other", "--json"], { cwd: root, stateRoot })
@@ -659,6 +659,35 @@ describe("cli", () => {
     assert.match(ps.stdout, /^stopped \(ttl 1h, .*\)\s+tilly\/main\s+api\s+local/m)
   })
 
+  test("wait checks a Cloudflare command on its local URL, where Access can't answer for it", async (t) => {
+    const root = await tempDir()
+    const stateRoot = await tempDir("work-cli-state-")
+    const sleeper = spawn("sleep", ["60"], { stdio: "ignore" })
+    t.after(() => sleeper.kill())
+    // The edge redirects to the Access login whether or not the command serves anything.
+    const edge = http.createServer((_request, response) => response.writeHead(302, { location: "https://team.cloudflareaccess.com/" }).end())
+    const local = http.createServer((_request, response) => response.writeHead(503).end())
+    for (const server of [edge, local]) {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      t.after(() => server.close())
+    }
+    const address = (server: http.Server) => `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`
+    await initGitRepo(root)
+    await writeFile(path.join(root, "work.config.js"), `export default { project: "tilly", commands: {} }`)
+    const exposure = { mode: "cloudflare", machine: "box", domain: "example.com", tunnelId: "00000000-0000-0000-0000-000000000000", credentialsFile: "credentials.json" }
+    await writeFile(path.join(stateRoot, "projects", "tilly", "workspaces", "main", "state.json"), JSON.stringify({
+      project: "tilly", workspace: "main", branch: "main", root, exposure,
+      commands: { web: {
+        id: "web", label: "web", command: "web", run: "web", route: "web-main-tilly", cwd: root, log: path.join(root, "web.log"),
+        url: address(edge), localUrl: address(local), exposure, startedAt: new Date().toISOString(), pid: sleeper.pid!,
+      } },
+    }))
+
+    const wait = await runCli(["wait", "web", "--timeout", "1"], { cwd: root, stateRoot })
+    assert.equal(wait.exitCode, 1)
+    assert.match(wait.stderr, /Last check: HTTP 503/)
+  })
+
   test("a mode switch needs --switch and then restarts what was live", async (t) => {
     const root = await tempDir()
     const stateRoot = await tempDir("work-cli-state-")
@@ -816,7 +845,7 @@ describe("cli", () => {
     const json = await runCli(["urls", "-p", "tilly", "feature-x", "--json"], { cwd: root, stateRoot })
     assert.equal(json.exitCode, 0)
     assert.equal(json.stderr, "")
-    assert.deepEqual(JSON.parse(json.stdout), [{ project: "tilly", workspace: "feature-x", command: "web", url: "https://web-feature-x-tilly.localhost" }])
+    assert.deepEqual(JSON.parse(json.stdout), [{ project: "tilly", workspace: "feature-x", command: "web", url: "https://web-feature-x-tilly.localhost", localUrl: null }])
 
     const ps = await runCli(["ps"], { cwd: root, stateRoot })
     assert.equal(ps.exitCode, 0)

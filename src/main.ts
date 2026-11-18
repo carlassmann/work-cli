@@ -971,7 +971,7 @@ function printUrlsModeNotes(states: Array<WorkspaceState>, requestedMode: string
 function urlsJson(states: Array<WorkspaceState>): string {
   return JSON.stringify(states.flatMap((state) => Object.values(state.commands)
     .filter((command) => command.url && !command.exitedAt)
-    .map((command) => ({ project: state.project, workspace: state.workspace, command: command.id, url: command.url }))))
+    .map((command) => ({ project: state.project, workspace: state.workspace, command: command.id, url: command.url, localUrl: command.localUrl ?? null }))))
 }
 
 async function runStop(args: ReadonlyArray<string>): Promise<Result<void>> {
@@ -1092,8 +1092,9 @@ async function runWait(args: ReadonlyArray<string>): Promise<Result<void>> {
   }
 
   if (!record.url) return ok(undefined)
-  // A tailnet URL resolves to this machine's tailnet address, which only other devices reach.
-  const probeUrl = record.exposure?.mode === "tailscale" ? record.localUrl ?? record.url : record.url
+  // The local URL reaches the command itself: a tailnet URL resolves to this machine's tailnet address, which only
+  // other devices reach, and a Cloudflare URL passes the edge, where Access answers with a login redirect on its own.
+  const probeUrl = record.localUrl ?? record.url
   const ready = await waitForUrl(probeUrl, Math.max(1, deadline - performance.now()), isAlive)
   if (!ready.ok) return errResult("ProcessError", `${ready.error.message}. ${logsHint}`)
   console.log(record.url)

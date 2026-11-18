@@ -362,7 +362,9 @@ web exited right after starting. Logs: work logs -p my-app -w main web
 
 For scripts and agents, `work ps --json` (or `status --json`) and `work urls --json`
 print arrays of `{ project, workspace, command, ... }` objects. They leave out stored
-environments and credentials, and print `[]` when nothing matches.
+environments and credentials, and print `[]` when nothing matches. `work urls --json`
+also gives each route's `localUrl`, its `*.localhost` URL on this machine, which
+reaches the command without Tailscale or Cloudflare Access in between.
 
 Every start writes a `── work: start <command> <time>` line into the command's log,
 and `work logs` prints only the output since then. `-n 50` keeps the last lines,
